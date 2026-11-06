@@ -6,7 +6,6 @@ variables (specs/13 §5; Decision P08-T02b1). The executor-backed system tools `
 
 from __future__ import annotations
 
-import asyncio
 import json
 import secrets
 import uuid
@@ -23,16 +22,15 @@ from llm_client_helpers import served_requests
 from llm_helpers import add_rules
 from media_helpers import FakeContextLoader, FakeMediaContainer, RecordingSignaller, call_context
 from runtime_rig import (
-    MODELS_DIR,
-    WAIT_S,
     RecordingRuntime,
     StaticOrgSettings,
     local_tool_source,
+    run_human_call,
     sim_backends,
     sim_runtime,
 )
 from service_helpers import json_log_stream, log_events
-from sim_media import EdgeRelay, realtime_telnyx, streamed_call
+from sim_media import EdgeRelay, realtime_telnyx
 from sms_rows import add_sms_number
 from sqlalchemy import select, update
 from telnyx_helpers import CALLEE, register
@@ -139,12 +137,15 @@ class ToolsRig:
         if to_number is not None:
             context = context.model_copy(update={"to_number": to_number})
         loader.contexts[seeded.call_id] = context
-        options: dict[str, Any] = {"carrier": {"answered_by": "human"}, "relay": self.relay}
-        options.update(state=self.state, container=self.container, call_id=seeded.call_id, answered=True)
-        async with streamed_call(MODELS_DIR, self.body, loader=loader, **options):
-            await self.body.end()
-            async with asyncio.timeout(WAIT_S):
-                await self.signaller.signalled.wait()
+        await run_human_call(
+            self.body,
+            self.signaller,
+            loader,
+            state=self.state,
+            container=self.container,
+            relay=self.relay,
+            call_id=seeded.call_id,
+        )
 
     async def events(self, seeded: SeededCall) -> list[CallEvent]:
         async with self.database.tenant_session(seeded.org_id) as session:

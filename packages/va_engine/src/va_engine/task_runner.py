@@ -20,6 +20,13 @@ to ``on_state``. A barge-in closes the round: unfinished tool tasks are cancelle
 tool that finished keeps its answer and its variables (specs/13 §4 Decision P08-FIX-20). A turn superseded
 before any audio (specs/07 §8) loses its messages except its completed tool rounds, which follow the merged
 caller message (specs/13 §4 Decision P08-FIX-17): the tools ran.
+
+With a :class:`~va_engine.turn_data.TurnData` port the call's ``timing: "every_turn"`` dynamic data is
+refreshed when a caller turn starts, before the turn's first request (not for the opener, a greeting, or a
+tool round): the refresh is committed in one synchronous step (its lines and events take effect and its
+variables are merged into the state, reported to ``on_state``), and the port's lines end the prompt's
+``## Context`` block. A turn cut before that step keeps nothing of the refresh (specs/13 §7 Decision
+P08-T03b).
 """
 
 from __future__ import annotations
@@ -63,6 +70,7 @@ from va_engine.tool_tasks import (
     settle_round,
     start_tools,
 )
+from va_engine.turn_data import TurnData, commit_refresh, refresh_turn
 from va_engine.voice_inputs import voice_prompt_inputs
 from va_llm.dialogue import DialogueRequest, DialogueStream
 from va_llm.errors import LlmUnavailableError
@@ -165,10 +173,12 @@ class TaskBrain:
         executor: ToolExecutor | None = None,
         memory_context: str | None = None,
         on_state: Callable[[EngineState], None] | None = None,
+        turn_data: TurnData | None = None,
     ) -> None:
         config = context.config
         if config.runner_type != "task" or config.task is None:
             raise ValueError(_NOT_TASK)
+        self._turn_data = turn_data
         self._context = context
         self._config = config
         self._gateway = gateway
@@ -237,9 +247,20 @@ class TaskBrain:
         if turn.supersedes is not None:
             self._drop_turn(turn.supersedes)
         self._accept(turn)
+        await self._refresh()
         async with contextlib.aclosing(self._respond()) as outputs:
             async for output in outputs:
                 yield output
+
+    async def _refresh(self) -> None:
+        """Refresh the per-turn data for the turn just accepted; lines, events and state change together,
+        only after the await. A call without per-turn data does nothing here (no scope is built, nothing
+        is awaited)."""
+        if self._turn_data is None:
+            return
+        refreshed = await refresh_turn(self._turn_data, self._scope())
+        if commit_refresh(self._state.variables, refreshed) and self._on_state is not None:
+            self._on_state(self._state)
 
     def _accept(self, turn: UserTurn) -> None:
         """Append the caller's turn (keypad turns as the DTMF message) and remember where it starts; the
@@ -459,6 +480,7 @@ class TaskBrain:
             instructions=self._render(self._task),
             variables={**self._config.request_data, **self._state.variables},
             memory_context=self._memory_context,
+            turn_sections=None if self._turn_data is None else self._turn_data.sections(),
         )
         system = render_voice_system(fit_voice_system(inputs, counter=self._counter, extra_tokens=extra))
         window = self._window.fit(self._messages).messages

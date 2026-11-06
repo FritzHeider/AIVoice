@@ -75,6 +75,12 @@ VAD thread pool) and yields a :class:`CallRuntime`. For each call :meth:`CallRun
     routine signals with) (:mod:`va_media.call_system_tools`; specs/13 §6 Decision P08-T02b2). Neither is
     offered when the other party has no E.164 number; at call end the executor waits for system tool runs a
     barge-in left running before the snapshot and the events are flushed (Decision P08-FIX-13).
+13. a call with ``timing: "every_turn"`` dynamic data hands its Brain the call's
+    :class:`~va_tools.turn_data.TurnDynamicData` from :class:`~va_media.call_dynamic_data.TurnDataSource`
+    (the shared tool HTTP client, the ``dyn:`` cache): every caller turn re-fetches the entries (800 ms, the
+    earlier value on a failure), the fetches become ``call.dynamic_data`` events through the recorder, and
+    the refreshed variables are snapshotted in ``call:{id}:engine`` (a task call gets the snapshot for them
+    even without tools) (specs/13 §7 Decision P08-T03b).
 """
 
 from __future__ import annotations
@@ -127,6 +133,7 @@ from va_llm import LlmMetrics
 from va_llm.platform import platform_gateway
 from va_llm.tokens import TokenCounter, default_counter
 from va_media.actions import MediaActions
+from va_media.call_dynamic_data import TurnDataSource
 from va_media.call_end import CallEnd
 from va_media.call_sms import CallSmsPort, OutboundSms, counterpart_number, dialable
 from va_media.call_system_tools import (
@@ -175,6 +182,7 @@ from va_telnyx import TelnyxClient, TelnyxClientFactory, UnknownTelnyxAccount, w
 from va_telnyx.settings import telnyx_factory, telnyx_http
 from va_tools.executor import SystemTool
 from va_tools.http import tools_client
+from va_tools.turn_data import TurnDynamicData
 from va_voice.background import BackgroundAssetError, BackgroundLibrary
 from va_voice.latency import LatencyTracer, TurnMetrics, TurnTracer
 from va_voice.outbound import FrameMixer
@@ -287,8 +295,10 @@ class CallRuntime:
         pathways: PathwayTools | None = None,
         call_tools: CallToolSource | None = None,
         callback_starter: CallbackStarter | None = None,
+        turn_data: TurnDataSource | None = None,
     ) -> None:
         self._settings = settings
+        self._turn_data = turn_data
         self._pathways = pathways
         self._call_tools = call_tools
         self._callbacks = (
@@ -464,6 +474,7 @@ class CallRuntime:
             saver=saver,
             call_tools=call_tools,
             system_tools=facts_for_call(context, org, sms_capable=sms_ok),
+            turn_data=self._turn_data_of(context, recorder),
         )
         if saver is not None:
             stack.push_async_callback(saver.aclose)
@@ -475,15 +486,17 @@ class CallRuntime:
     async def _task_brain(
         self, stack: AsyncExitStack, context: CallContext, org: OrgSettings, recorder: TurnRecorder | None
     ) -> TaskBrain:
-        """A task brain with the call's tools; with tools its state snapshot is flushed on exit."""
+        """A task brain with the call's tools and per-turn dynamic data; with either, its state snapshot
+        (the variables they set) is flushed on exit."""
         sms_ok, system = await self._system_tools(context, org, recorder)
         executor = (
             None
             if self._call_tools is None
             else await self._call_tools.executor(context, recorder, system=system)
         )
+        turn_data = self._turn_data_of(context, recorder)
         saver = None
-        if executor is not None and self._redis is not None:
+        if (executor is not None or turn_data is not None) and self._redis is not None:
             saver = EngineStateSaver(self._redis, context.call_id)
             stack.push_async_callback(saver.aclose)
         if executor is not None:
@@ -497,7 +510,13 @@ class CallRuntime:
             clock=self._clock,
             executor=executor,
             on_state=None if saver is None else saver.on_state,
+            turn_data=turn_data,
         )
+
+    def _turn_data_of(self, context: CallContext, recorder: TurnRecorder | None) -> TurnDynamicData | None:
+        """The call's per-turn dynamic data (``None``: the call has none, or the runtime no source)."""
+        source = self._turn_data
+        return None if source is None else source.for_call(context, recorder)
 
     async def _system_tools(
         self, context: CallContext, org: OrgSettings, recorder: TurnRecorder | None
@@ -810,11 +829,11 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
 ) -> AsyncIterator[CallRuntime]:
     """The per-process runtime over the container's ``database`` and ``redis`` (``TypeError`` without a
     database). The Silero model loads only when ``vad`` was verified; a load failure fails readiness. The
-    platform LLM connection is prewarmed (a failure is logged, never raised). Pathway calls and task-mode
-    tools share one guarded tool HTTP client (``WEBHOOK_ALLOW_PRIVATE``); pathway calls share one graph
-    cache. The Telnyx pool and client factory (BYO keys through :class:`TelnyxKeyResolver`) serve outbound
-    DTMF and the end-of-call hangup; the end routine signals ``CallWorkflow`` through a lazily connected
-    Temporal client (not a readiness check, specs/07 §2)."""
+    platform LLM connection is prewarmed (a failure is logged, never raised). Pathway calls, task-mode
+    tools and per-turn dynamic data share one guarded tool HTTP client (``WEBHOOK_ALLOW_PRIVATE``); pathway
+    calls share one graph cache. The Telnyx pool and client factory (BYO keys through
+    :class:`TelnyxKeyResolver`) serve outbound DTMF and the end-of-call hangup; the end routine signals
+    ``CallWorkflow`` through a lazily connected Temporal client (not a readiness check, specs/07 §2)."""
     database = getattr(container, "database", None)
     if not isinstance(database, Database):
         msg = "the media container has no database"
@@ -885,4 +904,10 @@ async def open_runtime(  # noqa: PLR0913 - the lifespan's collaborators, keyword
                 clock=clock,
             ),
             callback_starter=TemporalCallbackStarter(temporal, settings.temporal_task_queue),
+            turn_data=TurnDataSource(
+                tools_http=tools_http,
+                allow_http=insecure_urls_allowed(settings.va_env),
+                redis=container.redis,
+                clock=clock,
+            ),
         )

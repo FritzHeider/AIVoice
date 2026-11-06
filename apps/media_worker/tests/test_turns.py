@@ -12,62 +12,16 @@ import pytest
 from event_helpers import publisher_rig
 from media_helpers import call_context
 from pydantic import JsonValue
+from recorder_helpers import ORIGIN_MS, RecordingEvents, RecordingTurns, recorder
 from service_helpers import json_log_stream, log_events
 
 from va_common.time import FrozenClock
-from va_db.call_turns import CallTurnRow, LatencyMerge, TurnDelete, TurnOp
-from va_domain.call_context import CallContext
+from va_db.call_turns import CallTurnRow, LatencyMerge, TurnDelete
 from va_engine.pathway_brain import TurnTags
-from va_events import DomainEvent, EventType
-from va_media.turns import EVENT_MESSAGE_CHARS, STARTED_MESSAGE, CallPersistence, TurnRecorder
+from va_events import EventType
+from va_media.turns import EVENT_MESSAGE_CHARS, STARTED_MESSAGE, CallPersistence
 from va_voice.latency import LatencyEvent, TurnLatency, TurnReport, latency_events
 from va_voice.pipeline import AgentTurn, InterruptRecord, UserTurn
-
-ORIGIN_MS = 50_000.0
-
-
-class RecordingTurns:
-    def __init__(self, *, fail_flush: bool = False) -> None:
-        self.ops: list[TurnOp] = []
-        self.flushed: list[uuid.UUID] = []
-        self.fail_flush = fail_flush
-
-    def add(self, op: TurnOp) -> None:
-        self.ops.append(op)
-
-    async def flush_call(self, call_id: uuid.UUID) -> int:
-        if self.fail_flush:
-            raise ConnectionError
-        self.flushed.append(call_id)
-        return len(self.ops)
-
-
-class RecordingEvents:
-    def __init__(self, *, fail: bool = False) -> None:
-        self.events: list[DomainEvent] = []
-        self.fail = fail
-
-    async def publish(self, event: DomainEvent) -> DomainEvent:
-        if self.fail:
-            raise ConnectionError
-        self.events.append(event)
-        return event
-
-
-def recorder(
-    context: CallContext, *, offset_ms: float = 0.0, events: Any = None
-) -> tuple[TurnRecorder, RecordingTurns, RecordingEvents]:
-    turns = RecordingTurns()
-    sink = events if events is not None else RecordingEvents()
-    rec = TurnRecorder(
-        context,
-        turns=turns,
-        events=sink,
-        clock=FrozenClock(),
-        origin_ms=ORIGIN_MS,
-        answered_offset_ms=offset_ms,
-    )
-    return rec, turns, sink
 
 
 def user_turn(index: int, text: str, start: float, end: float, **values: Any) -> UserTurn:

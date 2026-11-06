@@ -32,6 +32,7 @@ from va_engine.navigation import ActiveGraph, PathwayLoader
 from va_engine.ports import HttpPort, SmsPort
 from va_engine.system_tools import SystemToolFacts
 from va_engine.tool_executor import PathwayToolExecutor
+from va_engine.turn_data import TurnData
 from va_llm.models import ChatMessage
 from va_llm.policy import CallType
 from va_llm.structured import validate_arguments
@@ -199,11 +200,13 @@ def engine_rig(  # noqa: PLR0913 - test knobs, all keyword-only
     tools: PathwayToolExecutor | None = None,
     system: SystemToolFacts | None = None,
     fillers: bool = True,
+    turn_data: TurnData | None = None,
 ) -> Rig:
     """An engine at the start of ``pathway`` (pathway :data:`PATHWAY_ID` v1) on a frozen clock (``facts``
-    replace the default restaurant facts; ``tools``/``system``/``fillers`` set the reply node tools)."""
+    replace the default restaurant facts; ``tools``/``system``/``fillers`` set the reply node tools;
+    ``turn_data`` is the per-turn data port of the engine and its prompt)."""
     clock = FrozenClock(NOW)
-    dialogue, source, _ = dialogue_rig(speculative=speculative)
+    dialogue, source, _ = dialogue_rig(speculative=speculative, turn_data=turn_data)
     keyed = port if port is not None else KeyedPort()
     events = RecordingEvents()
     lines = FakeLines()
@@ -220,6 +223,7 @@ def engine_rig(  # noqa: PLR0913 - test knobs, all keyword-only
             http=http,
             sms=sms,
             tools=tools,
+            turn_data=turn_data,
         ),
         facts=facts
         if facts is not None

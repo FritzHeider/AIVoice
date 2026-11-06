@@ -2168,3 +2168,28 @@ Grafana 3001
   partitions). Shared prefetch test pieces: `packages/va_workflows/tests/support/prefetch_rig.py` (`opener_config`,
   `phrase_cache()`, `opener_prerender`, `run_prefetch`). respx: `route.mock(side_effect=[answer])` (a list) keeps
   mypy happy for a `Response | Exception` parameter.
+- 2026-11-05 (P08-T03b): per-turn dynamic data (`timing: "every_turn"`; specs/13 §7 Decision P08-T03b) = the port
+  `va_engine.turn_data.TurnData` (`sections()`, `refresh(scope) -> TurnRefresh`: fetching changes NOTHING; await
+  it only through `refresh_turn`, then `commit_refresh(variables, refresh)` applies lines + events and merges the
+  variables in one synchronous step, taken after everything the turn awaits beside the refresh; rule: state a
+  port changes must never be separated from the caller's merge by an await or a sibling task, or a cut turn
+  keeps half of it) taken by `TaskBrain(turn_data=)`, `EnginePorts.turn_data` and
+  `PathwayPrompt(turn_data=)`; implementation `va_tools.turn_data.TurnDynamicData(fetcher, turn_specs(...),
+  initial=context.turn_sections, events=recorder)`; media `va_media.call_dynamic_data.TurnDataSource.for_call`
+  (`CallRuntime(turn_data=)`, `runtime_rig.sim_runtime(turn_data=)`). The pre-call phase fetches EVERY entry;
+  `every_turn` lines live in `CallContext.turn_sections[index]`, never in `context_sections`. `PathwayEngine`
+  commits the refresh after the decide/speculate task group (`Speculation.start` snapshots the variables after an
+  await). A 2xx answer that is no whole JSON document (`DynamicDataResult.readable` false: empty, text, cut at the
+  size cap) sets nothing, keeps a per-turn entry's lines like a failure, and is never cached (a stored answer
+  whose body is no JSON document is a miss). A per-turn entry that does not count in a turn holds the names
+  its last committed counted fetch set (`TurnDynamicData._names`, written only in `commit`), so an earlier
+  entry sharing a name does not take it over. `CallContext` ignores unknown TOP-LEVEL keys (`extra="ignore"`
+  there only; nested models and `SendCallConfig` stay `forbid`), so a new top-level field is additive for
+  readers of this build or newer: give it a default and never rely on a reader refusing it. Anything that makes a task call keep an engine snapshot must also be named in
+  `va_media.call_end._keeps_engine_state`, or the end routine never merges it into `calls.variables`. Fakes:
+  `turn_data_fakes.FakeTurnData(lines=, hold=).then(variables, *lines)/.failing(exc)` (`applied` = what a commit
+  reported, `fetched` event = a refresh returned; va_engine tests/support;
+  `engine_rig(turn_data=)`, `dialogue_rig(turn_data=)`), `tools_helpers.manual_fetcher()` (fetcher on a
+  `ManualClock`: `wait_for_sleep(0.8)` + `run_for(0.8)` for the budget; a `FrozenClock` fetcher times every refresh
+  out at once) and `HeldAnswer` (a respx answer the test holds), `recorder_helpers.recorder(context)` (media: a
+  real `TurnRecorder` over recording sinks; test files cannot import each other under `--import-mode=importlib`).

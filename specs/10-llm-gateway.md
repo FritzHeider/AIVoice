@@ -306,6 +306,10 @@ Placeholder rendering rules (all produced by `va_llm.prompts.render_voice_system
 > there is no block. The §6 fit never cuts these lines (they count towards the prompt's size). The engine fills
 > them from `CallContext.context_sections` for task calls (`va_engine.voice_inputs`) and pathway calls
 > (`DialogueSettings.context_sections`).
+>
+> Addendum (2026-11-05) P08-T03b: the block is `context_sections` followed by the lines of the call's per-turn
+> fetches in `dynamic_data` order: the lines its `TurnData` port holds at the time of the request, else
+> `CallContext.turn_sections` (specs/13 §7 Decision P08-T03b).
 
 ## 6. Conversation window (`window.py`)
 

@@ -21,6 +21,7 @@ from typing import Any, Final, cast
 from va_common.time import FrozenClock
 from va_engine.dialogue import GatewayDialogue
 from va_engine.prompt import DialogueSettings, PathwayPrompt
+from va_engine.turn_data import TurnData
 from va_llm.dialogue import DialogueRequest, DialogueStream
 from va_llm.errors import LlmUnavailableError
 from va_llm.models import ToolCall
@@ -175,9 +176,12 @@ def dialogue_settings(**over: Any) -> DialogueSettings:
 
 
 def dialogue_rig(
-    source: FakeSource | None = None, **settings: Any
+    source: FakeSource | None = None, *, turn_data: TurnData | None = None, **settings: Any
 ) -> tuple[GatewayDialogue, FakeSource, PathwayPrompt]:
-    """A :class:`GatewayDialogue` over a :class:`FakeSource` on a frozen clock at :data:`NOW`."""
+    """A :class:`GatewayDialogue` over a :class:`FakeSource` on a frozen clock at :data:`NOW` (``turn_data``
+    = the prompt's per-turn data port)."""
     fake = source if source is not None else FakeSource()
-    prompt = PathwayPrompt(dialogue_settings(**settings), counter=counter(), clock=FrozenClock(NOW))
+    prompt = PathwayPrompt(
+        dialogue_settings(**settings), counter=counter(), clock=FrozenClock(NOW), turn_data=turn_data
+    )
     return GatewayDialogue(fake, prompt), fake, prompt

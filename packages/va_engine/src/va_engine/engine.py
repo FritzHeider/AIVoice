@@ -12,6 +12,13 @@ engine chains another pass with an empty message, at most :data:`CHAIN_DEPTH_LIM
 Loop protection (``maxVisits``, chain depth, ``maxTotalTurns``) speaks the ``errorPhrase`` and ends the call.
 Side effects go through the injected ports; events go to :class:`~va_engine.engine_events.EngineEvents`.
 
+With a :class:`~va_engine.turn_data.TurnData` port the conversation's per-turn dynamic data is refreshed
+beside the decision pass of a caller turn (not the opener, a wait timeout, or a chained pass): the decision
+sees the earlier values; once decision and refresh both finished, and before the turn's extraction, the
+refresh is committed in one synchronous step (its lines, its events and its variables together, so a turn
+cut before that step keeps none of them), and a refresh that changed a variable or a context line discards
+the speculative reply (specs/13 §7 Decision P08-T03b).
+
 An ended conversation owes its consumer the :class:`~va_engine.models.results.EndCallAction` (Decision
 P08-FIX-16 under specs/13 §4): the final lines are not interruptible, and when the reply was closed before
 the end was yielded (a caller turn ended before the line's first audio, specs/07 §8) the next caller turn is
@@ -90,6 +97,7 @@ from va_engine.system_tools import EndCallArgs, SystemToolFacts
 from va_engine.task_runner import AGENT_END_CALL, DEFAULT_GOODBYE
 from va_engine.task_tools import MAX_INVALID_ROUNDS, MAX_TOOL_CALLS_PER_CALL, MAX_TOOL_ROUNDS, plan_round
 from va_engine.tool_executor import PathwayToolExecutor
+from va_engine.turn_data import TurnData, TurnRefresh, commit_refresh, refresh_turn
 from va_llm.models import ToolCall
 from va_llm.prompts import INTERRUPTION_MARK, dtmf_message
 from va_voice.pipeline.models import UserTurn
@@ -115,7 +123,8 @@ _log = get_logger(__name__)
 @dataclass(frozen=True, slots=True, kw_only=True)
 class EnginePorts:
     """The engine's collaborators (``loader``, ``http``, ``sms`` optional: their nodes report a problem;
-    ``tools`` optional: no custom tools are offered without it)."""
+    ``tools`` optional: no custom tools are offered without it; ``turn_data`` optional: nothing is refreshed
+    per turn without it)."""
 
     decider: Decider
     dialogue: GatewayDialogue
@@ -125,6 +134,7 @@ class EnginePorts:
     http: HttpPort | None = None
     sms: SmsPort | None = None
     tools: PathwayToolExecutor | None = None
+    turn_data: TurnData | None = None
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -330,7 +340,8 @@ class PathwayEngine:
                 async for action in actions:
                     yield action
             return
-        async with contextlib.aclosing(self._converse(run, latest=latest, history=history)) as actions:
+        reply = self._converse(run, latest=latest, history=history, refresh=True)
+        async with contextlib.aclosing(reply) as actions:
             async for action in actions:
                 yield action
 
@@ -391,11 +402,16 @@ class PathwayEngine:
         entering: Transition | None = None,
         latest: str = "",
         history: Sequence[TurnRecord] = (),
+        refresh: bool = False,
     ) -> AsyncGenerator[Action]:
-        """Execute the entered node (or decide first), then chain while the conversation does not wait."""
+        """Execute the entered node (or decide first), then chain while the conversation does not wait;
+        ``refresh`` = the first pass is a caller turn's and refreshes the per-turn data."""
         chained = 0
         while True:
-            step = self._execute(run, entering) if entering is not None else self._pass(run, latest, history)
+            if entering is not None:
+                step = self._execute(run, entering)
+            else:
+                step = self._pass(run, latest, history, refresh=refresh)
             async with contextlib.aclosing(step) as actions:
                 async for action in actions:
                     yield action
@@ -411,33 +427,63 @@ class PathwayEngine:
                     async for action in actions:
                         yield action
                 return
-            entering, latest, history = None, "", list(self.state.history)
+            entering, latest, history, refresh = None, "", list(self.state.history), False
 
-    async def _pass(self, run: _Run, latest: str, history: Sequence[TurnRecord]) -> AsyncGenerator[Action]:
-        """One decision pass at the current node, then the execution of where it lands."""
+    async def _pass(
+        self, run: _Run, latest: str, history: Sequence[TurnRecord], *, refresh: bool = False
+    ) -> AsyncGenerator[Action]:
+        """One decision pass at the current node, then the execution of where it lands.
+
+        The per-turn refresh is committed only here, in one synchronous step after the decision
+        finished: its lines, its events and its variables take effect together or (a turn cut or failed
+        before this point) not at all. Committing inside the refresh task would also hide the change from
+        the speculation, which snapshots the variables after an await.
+        """
         node = self._nav.node
         inputs = self._inputs(latest, history)
+        lines = self._turn_lines()
         try:
-            async with asyncio.TaskGroup() as group:
-                decided = group.create_task(
-                    self._ports.decider.decide(
-                        self._nav.graph,
-                        node,
-                        inputs,
-                        include_globals=self._nav.global_check_enabled(),
-                        now=self._clock.now(),
-                        timezone=self._facts.timezone,
-                    )
-                )
-                group.create_task(self._speculate(node))
+            decision, refreshed = await self._decide(node, inputs, refresh=refresh)
+            changed = commit_refresh(self.state.variables, refreshed)
+            changed = changed or self._turn_lines() != lines
             self._schedule_background(node, inputs)
-            entering, suffix = self._apply(node, decided.result())
-            await self._resolve_speculation(stays=entering is None, prompt_changed=suffix is not None)
+            entering, suffix = self._apply(node, decision)
+            await self._resolve_speculation(
+                stays=entering is None, prompt_changed=suffix is not None or changed
+            )
         finally:
             await self._close_speculation()
         async with contextlib.aclosing(self._execute(run, entering, suffix)) as actions:
             async for action in actions:
                 yield action
+
+    async def _decide(
+        self, node: PathwayNode, inputs: DecisionInputs, *, refresh: bool
+    ) -> tuple[TurnDecision, TurnRefresh | None]:
+        """The turn's decision, with the speculative reply and (``refresh``) the per-turn data refresh
+        running beside it; what the refresh fetched is returned, not in effect yet."""
+        port = self._ports.turn_data if refresh else None
+        refreshed: asyncio.Task[TurnRefresh | None] | None = None
+        async with asyncio.TaskGroup() as group:
+            decided = group.create_task(
+                self._ports.decider.decide(
+                    self._nav.graph,
+                    node,
+                    inputs,
+                    include_globals=self._nav.global_check_enabled(),
+                    now=self._clock.now(),
+                    timezone=self._facts.timezone,
+                )
+            )
+            group.create_task(self._speculate(node))
+            if port is not None:
+                refreshed = group.create_task(refresh_turn(port, self._ctx(node).scope()))
+        return decided.result(), (None if refreshed is None else refreshed.result())
+
+    def _turn_lines(self) -> tuple[str, ...]:
+        """The context lines of the per-turn data now."""
+        port = self._ports.turn_data
+        return () if port is None else port.sections()
 
     def _apply(self, node: PathwayNode, decision: TurnDecision) -> tuple[Transition | None, str | None]:
         """Merge the extraction, emit the decision events, and move (``None`` = stay on ``node``)."""

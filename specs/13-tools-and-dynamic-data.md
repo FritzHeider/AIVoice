@@ -551,8 +551,9 @@ Send Call `dynamic_data` (also persona/agent/inbound configs):
 - Emits `call.dynamic_data` with `{url (no query secrets), status_code, duration_ms, variables_set:[…], cached:bool}`.
 - Failures do not fail the call; event level `warning`.
 
-> Decision (2026-11-05) P08-T03a: the dynamic data core and the outbound pre-call fetch. `every_turn` (P08-T03b)
-> and the inbound budget (P08-T03c) build on it.
+> Decision (2026-11-05) P08-T03a: the dynamic data core and the outbound pre-call fetch. `every_turn` (Decision
+> P08-T03b below, which amends the "Outbound pre-call" paragraph: every entry is fetched there, whatever its
+> `timing`) and the inbound budget (P08-T03c) build on it.
 >
 > **One fetch** (`va_tools.dynamic_data.DynamicDataFetcher.fetch(spec, index, scope, timeout_ms=)`, never raises):
 > 1. The request is the spec rendered like a tool request (`va_tools.render.render_request`, the specs/13 §5
@@ -562,15 +563,26 @@ Send Call `dynamic_data` (also persona/agent/inbound configs):
 > 2. The cache is used only with `cache: true`, `cache_ttl_seconds` > 0 and a Redis client. The key is
 >    `dyn:{org_id}:{sha256 hex}` over `"<METHOD>\n<rendered url with the merged query>\n<body>"`, the body as
 >    compact JSON with sorted keys (empty for no body); headers are not part of it, the org is. The value is
->    `{"status": int, "body": <parsed JSON or text>}`. A readable value is a hit (no request, outcome `ok`,
->    `cached: true`, the JSONPaths applied to the stored body); an unreadable value and a Redis failure are misses.
+>    `{"status": int, "body": <parsed JSON document>}`. A stored value of that shape whose body is a JSON
+>    document (rule 4) is a hit (no request, outcome `ok`, `cached: true`, the JSONPaths applied to the stored
+>    body). Any other stored value is a miss, logged `tools.dynamic_data_cache_invalid`: one that does not
+>    parse into that shape, and (amended 2026-11-06) one whose body is text, a bare string, nothing or `null`,
+>    which only a build before this amendment could have stored. A Redis failure is a miss too.
 > 3. On a miss the request goes through the shared HTTP executor (specs/13 §9 Decision 2026-11-03) with
 >    `User-Agent` and `X-VA-Call-Id` and **without a signature**: step 4 of §5 signs tool requests only, and a
->    dynamic data endpoint authenticates the platform by its own header, as in the example above. Only a 2xx
->    answer that was not truncated and whose compact JSON is at most 262 144 bytes is stored
->    (`SET … EX cache_ttl_seconds`); a failed write is logged and ignored; failures are never cached.
+>    dynamic data endpoint authenticates the platform by its own header, as in the example above. Only a
+>    *readable* 2xx answer (rule 4: a whole JSON document, so never a truncated one) whose compact JSON is at
+>    most 262 144 bytes is stored (`SET … EX cache_ttl_seconds`); a failed write is logged and ignored.
+>    Failures are never cached, and (amended 2026-11-06) neither is a 2xx answer that is not readable (a
+>    proxy's 200 HTML page, an empty 200/204, a bare JSON string): it says nothing about the data, so like a
+>    500 it must not keep the endpoint from being asked again, by the next turn and by every other call of
+>    the org with the same rendered request, for up to `cache_ttl_seconds`.
 > 4. Variables are set only for the outcome `ok` (a 2xx answer): each `response_data` item sets `name` to the
->    JSONPath value of `data`. A null or missing value sets nothing, and neither does a value the stores behind
+>    JSONPath value of `data`. The JSONPaths are read only from a *readable* answer, a whole JSON document
+>    (`DynamicDataResult.readable`; amended 2026-11-06 with Decision P08-T03b item 3): an empty body, a body
+>    that is not JSON (a bare JSON string or `null` included, which the executor cannot tell from text and
+>    nothing) and a body cut at the executor's size cap are `ok`, not readable, and set nothing, also when the
+>    cut body happens to parse. A null or missing value sets nothing, and neither does a value the stores behind
 >    a call cannot hold (each is logged by name, never with the value, and skipped; the fetch stays `ok` with its
 >    other variables, and a skipped variable gets no context line): a value whose arrays and objects nest more
 >    than 32 deep (a scalar is 0, `[1]` is 1; the context JSON, the engine state and the event dumps stop at
@@ -612,6 +624,87 @@ Send Call `dynamic_data` (also persona/agent/inbound configs):
 >
 > **Prompt**: the context lines are the `## Context` block of the Voice System Prompt (specs/10 §5 Decision
 > P08-T03a) in task and pathway calls.
+
+> Decision (2026-11-05) P08-T03b: per-turn dynamic data (`timing: "every_turn"`) in calls.
+>
+> 1. **First value.** The pre-call phase (`PreCallDynamicData.fetch`) fetches EVERY `dynamic_data` entry,
+>    whatever its `timing` (this amends "the `timing: "pre_call"` specs" of Decision P08-T03a): the opener, the
+>    first prompt and the stale fallback need a value. The variables of all entries merge as in P08-T03a.
+>    Lines: `CallContext.context_sections` holds the merged lines of the `pre_call` entries only; the lines of
+>    each `every_turn` entry go to the new `CallContext.turn_sections[index]` (`dict[int, list[str]]`, the
+>    index being the entry's position in `dynamic_data`; an entry that produced no line has no key;
+>    `CallContext.turn_lines()` lists them in index order). The context version stays 1. Amended 2026-11-06:
+>    a worker writes the field into EVERY context (`"turn_sections": {}` when there is none) and a rolling
+>    update does not swap worker and media worker at the same instant, so a new top-level field is additive
+>    only for a reader that skips keys it does not know. From this build on `CallContext` does
+>    (`extra="ignore"` on the top-level model only; `config`, `memory` and every nested model still refuse an
+>    unknown key, and a change of meaning bumps `version`): a later field is additive for readers of this
+>    build or newer. No build older than this one is deployed, so `turn_sections` itself needs no such
+>    reader; a reader that refused it would rebuild the context from the `calls` row and lose the pre-call
+>    variables, the context lines and `opener_text`.
+> 2. **Refresh.** At the start of each user turn (speech or keypad; not the opener, not a `wait_for_greeting`
+>    greeting, not a no-input or node wait timeout, not a chained pass or a tool round, and not a turn refused
+>    by `maxTotalTurns`) every `every_turn` entry is fetched again, all concurrently and in ONE scope (the
+>    call's current variables, `request_data`, built-ins), each request with `timeout_ms` 800
+>    (`va_tools.turn_data.TURN_TIMEOUT_MS`) and no retries, the whole refresh within 0.8 s of the call clock
+>    (`TURN_BUDGET_S`). The request, cache and extraction rules are P08-T03a's (`cache: true` usually means a
+>    Redis hit; the media worker uses the same Redis as the worker, so `dyn:` entries are shared); requests are
+>    not signed.
+> 3. **Result.** A fetch that succeeded with a readable answer (P08-T03a rule 4: a whole JSON document): its
+>    variables are set over the call's variables (a later entry wins a name) and its lines replace that
+>    fetch's earlier lines wholesale (a variable the answer no longer has keeps its value, as "a null sets
+>    nothing" in P08-T03a, and loses its line). A failed or timed-out fetch changes nothing: the earlier value
+>    and lines stay (the stale value). Neither does a 2xx answer that is not readable (an empty body, a body
+>    that is not JSON, a body cut at the size cap): it says nothing about the data, so a proxy's 200 error
+>    page or one oversized answer must not erase context a 500 would have kept; its event is still `ok` with
+>    `variables_set: []` (and it is not cached, P08-T03a rule 3, so the next turn asks the endpoint again).
+>    Variables are never unset. The
+>    `## Context` block is the pre-call lines, then the turn lines in `dynamic_data` order; two entries of
+>    different timing that set one name both keep their line, the variable holds the later writer's value.
+>    **A name two `every_turn` entries share** (added 2026-11-06): "changes nothing" includes the names of
+>    the entry that did not count. Each entry holds the names its last counted fetch that was put in effect
+>    in this call set; in a turn in which it does not count (failed, timed out, not readable), an EARLIER
+>    entry that sets one of those names does not get it, so the variable keeps the later entry's last value
+>    instead of flipping to the earlier entry's and back (the earlier entry's own line still follows its
+>    answer, as any two entries sharing a name each keep their line). A later entry that counts wins the
+>    name as before; an entry that counted with an answer that no longer has a name no longer holds it; an
+>    entry that has not counted yet in this call holds nothing, because the pre-call phase records lines,
+>    not names (so on the first turns of a call, and always in a call whose context was rebuilt or that is
+>    inbound, a shared name follows the latest entry that counted in the turn).
+> 4. **Where the turn waits.** Pathway calls: the refresh runs beside the turn's decision calls and the
+>    speculative reply; the node is executed after both finished (so after at most `max(decision, 0.8 s)`);
+>    the decision itself sees the earlier values. The refreshed variables are merged once both finished and
+>    BEFORE the turn's extraction is applied (extraction and tool variables of the turn win a shared name). A
+>    refresh that changed a variable value or a turn line discards the speculative reply (`prompt_changed`);
+>    an unchanged one keeps it. Task calls have no routing step: the turn's first request waits for the
+>    refresh (at most 0.8 s; a cache hit costs one Redis GET).
+> 5. **Cut.** The variables, the lines and the events of a refresh are ONE commit: fetching changes nothing
+>    (`TurnData.refresh` returns a pending `TurnRefresh`), and the turn puts it in effect in a single
+>    synchronous step (`commit_refresh`: `apply()` replaces the lines and reports the fetches, then the
+>    variables are merged) once everything it awaits beside the refresh has finished: in a pathway call after
+>    the decision calls, in a task call right after the refresh. A turn cut before that step (a barge-in
+>    merge, a superseded turn), whether its refresh is still running (the fetches are cancelled) or already
+>    finished while the decision calls run (the common case: a cache hit takes milliseconds, a decision
+>    hundreds), and a turn whose decision fails, leaves no trace: nothing is merged, no line changes, no
+>    event is written; the next turn refreshes again. Only the `dyn:` cache entry of a fetch that completed
+>    stays (it is the endpoint's answer, not call state). A port that raises, in the refresh or in `apply()`,
+>    is logged (`engine.turn_data_failed`) and the reply goes on with the earlier values.
+> 6. **Events and state.** One `call.dynamic_data` per fetch per turn (message, data and level as in
+>    P08-T03a, `timing: "every_turn"`), published by the media worker through the call's `TurnRecorder` in
+>    `dynamic_data` order. The refreshed variables are part of the engine state snapshot
+>    (`call:{id}:engine`); a task call with `every_turn` entries gets the snapshot (and the end routine's
+>    merge into `calls.variables`) even without tools. The turn lines are not part of `EngineState` (a voice
+>    call never resumes from a snapshot).
+> 7. **Not yet.** Inbound calls have no pre-call fetch until P08-T03c: their `every_turn` entries get their
+>    first value at the first user turn, as does a context the media worker rebuilt from the `calls` row.
+>
+> Code: the port `va_engine.turn_data.TurnData` (`sections()`, `refresh(scope) -> TurnRefresh` with
+> `variables` and `apply()`; `refresh_turn` never raises, `commit_refresh(variables, refresh)`) used by
+> `TaskBrain(turn_data=)`, `PathwayEngine` (`EnginePorts.turn_data`) and `PathwayPrompt(turn_data=)`; its
+> implementation `va_tools.turn_data.TurnDynamicData` (`refresh` → `FetchedTurn`; the held names are
+> updated only by `commit`, never by a refresh) over the
+> `DynamicDataFetcher`; the media worker's `va_media.call_dynamic_data.TurnDataSource` (the shared tool HTTP
+> client, Redis, clock) builds one per call that has `every_turn` entries.
 
 ## 8. Custom code sandbox (`va_tools.sandbox.deno`)
 

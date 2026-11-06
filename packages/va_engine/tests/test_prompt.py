@@ -10,6 +10,7 @@ from dialogue_helpers import CALL_ID, NOW, ORG_ID, counter, dialogue_rig, dialog
 from graph_helpers import fixture
 from handler_helpers import handler_ctx
 from resolved_configs import resolved_config
+from turn_data_fakes import FakeTurnData
 
 from va_common.time import FrozenClock
 from va_domain.call_context import CallContext
@@ -115,6 +116,31 @@ def test_system_prompt_ends_with_the_calls_dynamic_data_context() -> None:
     assert "- customer_name: Ana" in system
     assert system.endswith("\n\n## Context\nThe customer's name is Ana.\nTheir plan is Pro.")
     assert "## Context" not in _system(ctx)
+
+
+def test_the_turn_lines_follow_the_pre_call_lines_in_the_context_block() -> None:
+    ctx = handler_ctx(_node(prompt="Ask."))
+    port = FakeTurnData(lines=("Their plan is gold.",))
+    _, _, prompt = dialogue_rig(
+        turn_data=port, context_sections=("The customer's name is Ana.",), turn_sections=("stale",)
+    )
+
+    assert prompt.system(ctx).endswith("\n\n## Context\nThe customer's name is Ana.\nTheir plan is gold.")
+    port.lines = ("Their plan is platinum.", "They have 4 seats.")
+    assert prompt.system(ctx).endswith(
+        "\n\n## Context\nThe customer's name is Ana.\nTheir plan is platinum.\nThey have 4 seats."
+    )
+    port.lines = ()
+    assert prompt.system(ctx).endswith("\n\n## Context\nThe customer's name is Ana.")
+
+
+def test_without_a_port_the_settings_turn_lines_end_the_context_block() -> None:
+    ctx = handler_ctx(_node(prompt="Ask."))
+
+    system = _system(ctx, context_sections=("The customer's name is Ana.",), turn_sections=("Seats: 4.",))
+
+    assert system.endswith("\n\n## Context\nThe customer's name is Ana.\nSeats: 4.")
+    assert _system(ctx, turn_sections=("Seats: 4.",)).endswith("\n\n## Context\nSeats: 4.")
 
 
 def test_instruction_templates_are_the_applied_global_prompt_and_the_prompt_or_text() -> None:
@@ -304,6 +330,7 @@ def test_settings_for_call_map_the_context_and_org() -> None:
             "config": config,
             "variables": {},
             "context_sections": ["The customer's name is Ana."],
+            "turn_sections": {"2": ["Seats: 4."], "0": ["Their plan is gold."]},
             "created_at": NOW,
         }
     )
@@ -324,5 +351,6 @@ def test_settings_for_call_map_the_context_and_org() -> None:
         speculative=False,
         memory_context="m",
         context_sections=("The customer's name is Ana.",),
+        turn_sections=("Their plan is gold.", "Seats: 4."),
     )
     assert PathwayPrompt(settings, counter=counter(), clock=FrozenClock(NOW)).settings is settings

@@ -7,14 +7,21 @@ Rules: specs/13 §7 Decision P08-T03a. :meth:`DynamicDataFetcher.fetch` runs one
    expressions percent-encoded, ``query`` merged into the URL, headers as text, a lone body expression keeps
    its value's type). A template that does not parse is the outcome ``render_error``; nothing is sent.
 2. With ``cache: true``, a ``cache_ttl_seconds`` above zero and a Redis client, the answer is looked up
-   under :func:`cache_key` first. A stored ``{"status": int, "body": JSON}`` is a hit: no request, outcome
-   ``ok``, ``cached``. An unreadable value and a Redis failure are misses.
+   under :func:`cache_key` first. A stored ``{"status": int, "body": JSON}`` whose body is a JSON document
+   (rule 4) is a hit: no request, outcome ``ok``, ``cached``. Any other stored value (not that shape, or
+   a body that is text, a bare string, nothing or ``null``, which an earlier build could store) and a Redis
+   failure are misses.
 3. On a miss the request goes through the :class:`~va_engine.ports.HttpPort` (SSRF guard, size cap; no
-   retries). Only a 2xx answer that was not truncated and whose compact JSON is at most
-   :data:`MAX_CACHED_BYTES` is stored (``SET … EX cache_ttl_seconds``); a failed write is ignored. Failures
-   are never cached. The key covers the org, the method, the rendered URL and the body, not the headers.
+   retries). Only a ``readable`` 2xx answer (rule 4) whose compact JSON is at most :data:`MAX_CACHED_BYTES`
+   is stored (``SET … EX cache_ttl_seconds``); a failed write is ignored. Failures are never cached, and
+   neither is a 2xx answer that is not readable: it says nothing about the data, so the endpoint is asked
+   again by the next fetch, as after a failure. The key covers the org, the method, the rendered URL and
+   the body, not the headers.
 4. Variables (outcome ``ok`` only): each ``response_data`` item sets ``name`` to the JSONPath value of
-   ``data``. A null (or missing) value sets nothing, and neither does a value the stores behind a call
+   ``data``. The JSONPaths are read only from a ``readable`` answer: a whole JSON document, so not an empty
+   body, not a body that is no JSON (a bare JSON string or ``null`` included) and not one cut at the size
+   cap; any other 2xx answer is ``ok`` and sets nothing. A null (or missing) value sets nothing, and
+   neither does a value the stores behind a call
    cannot hold: containers nested more than :data:`MAX_VARIABLE_DEPTH` deep (the context JSON, the engine
    state and the event dumps stop at about 254 levels and wrap a variable in levels of their own), U+0000
    in any string or object key (Postgres ``jsonb`` refuses it), or compact JSON above
@@ -136,8 +143,11 @@ class DynamicDataResult:
     """What one dynamic data fetch produced.
 
     ``index`` is the spec's position in the call's ``dynamic_data``; ``url`` has no user info, query or
-    fragment (empty when the URL is unknown or unusable). ``variables`` are the variables set, ``sections``
-    the context line of each variable that has one; both are empty unless the outcome is ``ok``.
+    fragment (empty when the URL is unknown or unusable). ``readable`` tells whether the answer was a whole
+    JSON document the JSONPaths could be read from (never for a failure, an empty body, a body that is not
+    JSON, a bare JSON string or ``null``, or a body cut at the size cap). ``variables`` are the variables
+    set, ``sections`` the context line of each variable that has one; both are empty unless the answer was
+    ``readable``.
     """
 
     index: int
@@ -148,6 +158,7 @@ class DynamicDataResult:
     status_code: int | None = None
     duration_ms: int = 0
     cached: bool = False
+    readable: bool = False
     variables: dict[str, JsonValue] = field(default_factory=dict)
     sections: dict[str, str] = field(default_factory=dict)
 
@@ -221,8 +232,15 @@ def _request_spec(spec: DynamicDataSpec, index: int, timeout_ms: int) -> ToolSpe
     )
 
 
+def _json_document(body: JsonValue, *, truncated: bool) -> bool:
+    """Whether a response body is a whole parsed JSON document the JSONPaths can be read from: not one cut
+    at the size cap, not text (which a bare JSON string also reads as), not nothing or ``null``."""
+    return not truncated and body is not None and not isinstance(body, str)
+
+
 def _cached_answer(raw: object) -> tuple[int, JsonValue] | None:
-    """The ``(status, body)`` of a stored value, ``None`` when it is not one."""
+    """The ``(status, body)`` of a stored answer; ``None`` when the value is not one or its body is not a
+    JSON document (only readable answers are stored, so such a value says nothing about the data)."""
     if not isinstance(raw, str | bytes | bytearray):
         return None
     try:
@@ -235,6 +253,8 @@ def _cached_answer(raw: object) -> tuple[int, JsonValue] | None:
     if isinstance(status, bool) or not isinstance(status, int):
         return None
     body: JsonValue = value["body"]
+    if not _json_document(body, truncated=False):
+        return None
     return status, body
 
 
@@ -310,8 +330,8 @@ class DynamicDataFetcher:
         hit = None if redis is None else await self._lookup(redis, key, index)
         if hit is not None:
             status, body = hit
-            json_body = None if isinstance(body, str) else body
-            extracted = extract_all(json_body, call.extract) if json_body is not None else {}
+            readable = True
+            extracted = extract_all(body, call.extract)
         else:
             outcome = await self._http.execute(call)
             if not outcome.succeeded:
@@ -323,8 +343,10 @@ class DynamicDataFetcher:
                     method=call.method,
                     status_code=outcome.status,
                 )
-            status, extracted = outcome.status or 0, outcome.extracted
-            if redis is not None and not outcome.truncated:
+            status = outcome.status or 0
+            readable = _json_document(outcome.body, truncated=outcome.truncated)
+            extracted = outcome.extracted if readable else {}
+            if redis is not None and readable:
                 await self._store(redis, key, spec.cache_ttl_seconds, (status, outcome.body), index)
         variables = self._variables(spec, extracted, index)
         return DynamicDataResult(
@@ -335,6 +357,7 @@ class DynamicDataFetcher:
             method=call.method,
             status_code=status,
             cached=hit is not None,
+            readable=readable,
             variables=variables,
             sections=self._sections(spec, variables, scope, index),
         )

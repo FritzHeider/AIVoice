@@ -476,6 +476,34 @@ async def test_a_pathway_calls_final_variables_are_merged(database: Database, en
         assert call.variables == {"name": "Ann", "party": 4, "time": "7pm"}
 
 
+def _fetch(timing: str) -> dict[str, Any]:
+    return {
+        "url": "https://crm.acme.test/plan",
+        "timing": timing,
+        "response_data": [{"name": "plan", "data": "$.plan"}],
+    }
+
+
+@pytest.mark.parametrize(
+    ("dynamic_data", "merged"),
+    [
+        ([_fetch("pre_call"), _fetch("every_turn")], {"plan": "platinum"}),
+        ([_fetch("pre_call")], {"plan": "gold"}),
+        ([], {"plan": "gold"}),
+    ],
+    ids=["every_turn", "pre_call_only", "none"],
+)
+async def test_a_task_call_s_snapshot_is_merged_only_when_it_refreshes_per_turn_data(
+    database: Database, dynamic_data: list[dict[str, Any]], merged: dict[str, Any]
+) -> None:
+    """specs/13 §7 Decision P08-T03b: a tool-less task call keeps a snapshot for its refreshed variables."""
+    config = {"dynamic_data": dynamic_data}
+    async with rig(database, context_config=config, variables={"plan": "gold"}) as r:
+        await r.redis.set(engine_state_key(r.call.call_id), engine_snapshot({"plan": "platinum"}))
+        await r.finish(ended("agent_end_call", "agent"))
+        assert (await load_call(database, r.call)).variables == merged
+
+
 @pytest.mark.parametrize(
     ("snapshot", "event", "problem"),
     [

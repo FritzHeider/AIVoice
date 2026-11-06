@@ -56,6 +56,22 @@ def test_the_contexts_dynamic_data_lines_become_the_context_block() -> None:
     assert tuple(plain.context_sections) == ()
 
 
+def test_the_turn_lines_follow_the_pre_call_lines() -> None:
+    context = task_context().model_copy(
+        update={"context_sections": LINES, "turn_sections": {3: ["Seats: 4."], 1: ["Balance: 12."]}}
+    )
+
+    stored = voice_prompt_inputs(context, now=NOW, instructions="Help.", variables={})
+    refreshed = voice_prompt_inputs(
+        context, now=NOW, instructions="Help.", variables={}, turn_sections=("Balance: 0.",)
+    )
+    none = voice_prompt_inputs(context, now=NOW, instructions="Help.", variables={}, turn_sections=())
+
+    assert tuple(stored.context_sections) == (*LINES, "Balance: 12.", "Seats: 4.")
+    assert tuple(refreshed.context_sections) == (*LINES, "Balance: 0.")
+    assert tuple(none.context_sections) == tuple(LINES)
+
+
 async def test_a_task_call_sends_pre_call_variables_and_context_to_the_model() -> None:
     context = task_context(
         variables={"customer_name": "Ana", "plan": "Pro"},

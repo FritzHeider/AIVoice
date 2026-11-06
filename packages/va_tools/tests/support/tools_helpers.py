@@ -1,28 +1,43 @@
 """va_tools test helpers: executors over a plain (respx-patched) client or the guarded production client,
-a recording :class:`~va_tools.executor.ToolEvents` and a system tool whose run the test holds."""
+a recording :class:`~va_tools.executor.ToolEvents`, a system tool whose run the test holds, a respx answer
+the test holds (:class:`HeldAnswer`) and a dynamic data fetcher on a manual clock (:func:`manual_fetcher`)."""
 
 from __future__ import annotations
 
 import asyncio
+import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any, Final
 
 import httpx
-from clock_helpers import RecordingClock
+from clock_helpers import ManualClock, RecordingClock
 from dns_fakes import MappedResolver
+from redis.asyncio import Redis
 from service_helpers import settings_of
 
 from va_common.settings import WebhookSafetySettings
 from va_engine.ports import HttpCall, HttpMethod
 from va_llm.models import ToolCall
+from va_tools.dynamic_data import DynamicDataFetcher
 from va_tools.executor import SystemOutcome
 from va_tools.http import HttpExecutor, Signer, open_http_executor
 
-__all__ = ["API", "GatedSystem", "RecordedEvents", "call", "guarded_executor", "plain_executor"]
+__all__ = [
+    "API",
+    "ORG",
+    "GatedSystem",
+    "HeldAnswer",
+    "RecordedEvents",
+    "call",
+    "guarded_executor",
+    "manual_fetcher",
+    "plain_executor",
+]
 
 API: Final = "https://api.acme.test"
+ORG: Final = uuid.UUID("0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d71")
 
 
 def call(
@@ -55,6 +70,37 @@ async def plain_executor(
             ),
             recording,
         )
+
+
+class HeldAnswer:
+    """A respx side effect that answers ``body`` once ``gate`` is set and records what arrived."""
+
+    def __init__(self, body: dict[str, Any]) -> None:
+        self.body = body
+        self.gate = asyncio.Event()
+        self.arrived = asyncio.Event()
+        self.cancelled = False
+
+    async def __call__(self, request: httpx.Request) -> httpx.Response:
+        del request
+        self.arrived.set()
+        try:
+            await self.gate.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        return httpx.Response(200, json=self.body)
+
+
+@asynccontextmanager
+async def manual_fetcher(
+    *, redis: Redis | None = None, org_id: uuid.UUID = ORG
+) -> AsyncIterator[tuple[ManualClock, DynamicDataFetcher]]:
+    """A dynamic data fetcher over the real executor (respx intercepts its client) on a manual clock."""
+    clock = ManualClock()
+    async with httpx.AsyncClient() as client:
+        executor = HttpExecutor(client, clock=clock, allow_http=False, call_id="call-7")
+        yield clock, DynamicDataFetcher(executor, redis=redis, org_id=org_id, clock=clock)
 
 
 @asynccontextmanager

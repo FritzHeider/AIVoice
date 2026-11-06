@@ -11,7 +11,9 @@ the call's SMS port, the cache's loader (forwarding, Transfer Pathway) and :clas
 events → call events through the call's :class:`~va_media.turns.TurnRecorder`). With the call's
 :class:`~va_media.call_tools.PathwayCallTools` its reply nodes run their custom tools and the call's
 executor-backed system tools, and the loader also loads the stored tools of every graph the call switches to;
-``system_tools`` are the system tools the call allows its reply nodes.
+``system_tools`` are the system tools the call allows its reply nodes. ``turn_data`` is the call's per-turn
+dynamic data (specs/13 §7 Decision P08-T03b): the engine refreshes it at every caller turn and the reply
+prompt reads its context lines.
 
 :class:`PathwayToolEvents` reports the call's tool runs through the recorder; ``call.tool`` also carries the
 engine turn and node the run was reported at (``turn_index``, ``node_id``), which is what lists it in the
@@ -52,6 +54,7 @@ from va_engine.pathway_call import ENGINE_STATE_TTL_S, engine_state_key, pathway
 from va_engine.ports import SmsPort
 from va_engine.prompt import DialogueSettings, PathwayPrompt
 from va_engine.system_tools import SystemToolFacts
+from va_engine.turn_data import TurnData
 from va_llm.tokens import TokenCounter
 from va_media.call_tools import PathwayCallTools
 from va_media.turns import TurnRecorder
@@ -172,10 +175,13 @@ def build_pathway_brain(  # noqa: PLR0913 - the call plus its per-process collab
     saver: EngineStateSaver | None,
     call_tools: PathwayCallTools | None = None,
     system_tools: SystemToolFacts | None = None,
+    turn_data: TurnData | None = None,
 ) -> PathwayBrain:
     """The call's brain on ``active`` (its pinned version, :func:`load_call_graph`) starting at ``state``
     (:func:`~va_engine.pathway_call.start_state`)."""
-    prompt = PathwayPrompt(DialogueSettings.for_call(context, org), counter=counter, clock=clock)
+    prompt = PathwayPrompt(
+        DialogueSettings.for_call(context, org), counter=counter, clock=clock, turn_data=turn_data
+    )
     loader = tools.graphs.loader(context.org_id)
     engine = PathwayEngine(
         state,
@@ -191,6 +197,7 @@ def build_pathway_brain(  # noqa: PLR0913 - the call plus its per-process collab
             ),
             sms=sms,
             tools=None if call_tools is None else call_tools.executor,
+            turn_data=turn_data,
         ),
         facts=pathway_facts(
             context, now=clock.now(), system_tools=system_tools, tool_fillers=org.engine.tool_fillers

@@ -3,7 +3,9 @@
 The pathway reply uses the specs/10 §4/§5 message layout of the task-mode runner: the Voice System Prompt
 (its ``instructions`` = the applied global prompt, the ``## Current step`` block and the loop-condition
 suffix), the tool note, the node's dialogue examples, the conversation summary, then the trimmed history
-window (plus the caller's in-turn ``extra`` messages, e.g. tool rounds).
+window (plus the caller's in-turn ``extra`` messages, e.g. tool rounds). The prompt's ``## Context`` block is
+the call's pre-call dynamic data lines followed by the lines of its per-turn fetches, read from the
+:class:`~va_engine.turn_data.TurnData` port at every request (specs/13 §7 Decision P08-T03b).
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from va_engine.models.graph import PathwayGraph
 from va_engine.models.nodes import PathwayNode
 from va_engine.models.state import EngineState, TurnRecord
 from va_engine.templating import zone_named
+from va_engine.turn_data import TurnData
 from va_engine.voice_inputs import counterpart_of
 from va_llm.dialogue import DialogueRequest
 from va_llm.models import ChatMessage, ToolDef
@@ -67,7 +70,9 @@ class DialogueSettings:
 
     ``dialogue_model``/``temperature`` are the call config's values (the last layers of §13 before the
     platform default); ``speculative`` is the org's ``engine.speculative``; ``context_sections`` are the
-    call's dynamic data context lines (the prompt's ``## Context`` block, specs/13 §7).
+    call's pre-call dynamic data context lines and ``turn_sections`` the lines its per-turn fetches had when
+    the call started (the prompt's ``## Context`` block, specs/13 §7; a prompt with a
+    :class:`~va_engine.turn_data.TurnData` port reads the turn lines from it instead).
     """
 
     org_id: uuid.UUID
@@ -82,6 +87,7 @@ class DialogueSettings:
     speculative: bool = True
     memory_context: str | None = None
     context_sections: tuple[str, ...] = ()
+    turn_sections: tuple[str, ...] = ()
 
     @classmethod
     def for_call(
@@ -102,6 +108,7 @@ class DialogueSettings:
             speculative=org.engine.speculative,
             memory_context=memory_context,
             context_sections=tuple(context.context_sections),
+            turn_sections=tuple(context.turn_lines()),
         )
 
 
@@ -199,10 +206,18 @@ def dialogue_temperature(ctx: TurnContext, settings: DialogueSettings) -> float:
 class PathwayPrompt:
     """Builds the :class:`DialogueRequest` of a pathway reply at the context's node."""
 
-    def __init__(self, settings: DialogueSettings, *, counter: TokenCounter, clock: Clock) -> None:
+    def __init__(
+        self,
+        settings: DialogueSettings,
+        *,
+        counter: TokenCounter,
+        clock: Clock,
+        turn_data: TurnData | None = None,
+    ) -> None:
         self._settings = settings
         self._counter = counter
         self._clock = clock
+        self._turn_data = turn_data
         self._window = ConversationWindow(settings.context_budget_tokens, counter)
 
     @property
@@ -213,6 +228,8 @@ class PathwayPrompt:
         """The rendered Voice System Prompt at the context's node, fitted with ``extra_tokens`` beside it."""
         settings = self._settings
         variables = {**ctx.request_data, **ctx.state.variables}
+        port = self._turn_data
+        turn_sections = settings.turn_sections if port is None else port.sections()
         inputs = VoicePromptInputs(
             now_local=self._clock.now().astimezone(zone_named(ctx.timezone)),
             timezone=ctx.timezone,
@@ -222,7 +239,7 @@ class PathwayPrompt:
             counterpart=settings.counterpart,
             variables=cast("dict[str, PromptValue]", variables),
             memory_context=settings.memory_context,
-            context_sections=settings.context_sections,
+            context_sections=(*settings.context_sections, *turn_sections),
         )
         return render_voice_system(fit_voice_system(inputs, counter=self._counter, extra_tokens=extra_tokens))
 

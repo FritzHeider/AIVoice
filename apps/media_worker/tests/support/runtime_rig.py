@@ -15,9 +15,10 @@ from typing import Final
 
 import fakeredis
 import httpx
-from media_helpers import RecordingSignaller
+from media_helpers import FakeContextLoader, FakeMediaContainer, RecordingSignaller
 from redis.asyncio import Redis
 from service_helpers import settings_of
+from sim_media import EdgeRelay, streamed_call
 from starlette.applications import Starlette
 from telnyx_client_helpers import sms_number
 from telnyx_helpers import VOICE_URL
@@ -34,6 +35,7 @@ from va_domain.org import OrgSettings
 from va_llm import LlmGateway, LlmMetrics, ProviderRegistry
 from va_llm.providers import platform_provider
 from va_llm.tokens import default_counter
+from va_media.call_dynamic_data import TurnDataSource
 from va_media.call_end import CallEnd
 from va_media.call_system_tools import CallbackStarter
 from va_media.call_tools import CallToolSource
@@ -60,6 +62,7 @@ __all__ = [
     "SimRuntime",
     "StaticOrgSettings",
     "local_tool_source",
+    "run_human_call",
     "sim_backends",
     "sim_runtime",
 ]
@@ -163,6 +166,34 @@ def local_tool_source(database: Database, tools_http: httpx.AsyncClient) -> Call
     )
 
 
+async def run_human_call(  # noqa: PLR0913 - the pieces of one rig, keyword-only
+    body: RecordingRuntime,
+    signaller: RecordingSignaller,
+    loader: FakeContextLoader,
+    *,
+    state: SimState,
+    container: FakeMediaContainer,
+    relay: EdgeRelay,
+    call_id: uuid.UUID,
+) -> None:
+    """Stream the registered scenario's call ``call_id`` (answered by a human) through ``body`` to its end
+    and wait until the end routine signalled the workflow."""
+    async with streamed_call(
+        MODELS_DIR,
+        body,
+        loader=loader,
+        carrier={"answered_by": "human"},
+        relay=relay,
+        state=state,
+        container=container,
+        call_id=call_id,
+        answered=True,
+    ):
+        await body.end()
+        async with asyncio.timeout(WAIT_S):
+            await signaller.signalled.wait()
+
+
 @asynccontextmanager
 async def sim_runtime(  # noqa: PLR0913 - keyword-only collaborators of the runtime
     state: SimState,
@@ -177,13 +208,15 @@ async def sim_runtime(  # noqa: PLR0913 - keyword-only collaborators of the runt
     pathways: PathwayTools | None = None,
     call_tools: CallToolSource | None = None,
     callback_starter: CallbackStarter | None = None,
+    turn_data: TurnDataSource | None = None,
 ) -> AsyncIterator[SimRuntime]:
     """The runtime over ``state`` (FakeTelnyx) and the served FakeElevenLabs/FakeLLM ``urls``. With
     ``database`` its end-of-call routine runs too (over ``end_redis``, FakeTelnyx, ``persistence``'s events
     and a :class:`RecordingSignaller`). ``messaging``: FakeTelnyx's platform account gets a messaging profile
     (the runtime's ``TELNYX_MESSAGING_PROFILE_ID``) and an SMS number on it (``SimRuntime.sms_number``).
     ``pathways``: the runtime runs pathway calls with these per-process pieces; ``call_tools``: task calls get
-    their custom tools from this source (and ``callback_starter`` starts ``schedule_callback`` children)."""
+    their custom tools from this source (and ``callback_starter`` starts ``schedule_callback`` children);
+    ``turn_data``: calls with ``every_turn`` dynamic data refresh it through this source."""
     settings = settings_of(
         MediaSettings,
         elevenlabs_ws_base=urls["elevenlabs"].replace("http://", "ws://"),
@@ -246,5 +279,6 @@ async def sim_runtime(  # noqa: PLR0913 - keyword-only collaborators of the runt
             pathways=pathways,
             call_tools=call_tools,
             callback_starter=callback_starter,
+            turn_data=turn_data,
         )
         yield SimRuntime(RecordingRuntime(runtime), settings, telnyx, signaller, sms, metrics)

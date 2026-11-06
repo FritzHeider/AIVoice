@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -22,6 +23,7 @@ from va_domain.call_context import (
 from va_domain.calls.config import SendCallConfig
 
 AT = datetime(2026, 11, 1, 12, tzinfo=UTC)
+MEMORY_ID = "0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d73"
 
 
 def _config(**over: Any) -> SendCallConfig:
@@ -86,22 +88,49 @@ def test_a_full_context_survives_a_json_round_trip() -> None:
         test_call=True,
         variables={"plan": {"tier": "gold"}, "count": 3},
         context_sections=["## Account\nGold"],
+        turn_sections={2: ["Seats: 4."], 0: ["Their plan is gold.", "They owe 3."]},
         memory=memory,
         trace_context={"traceparent": "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"},
     )
 
-    assert CallContext.model_validate_json(context.model_dump_json()) == context
+    restored = CallContext.model_validate_json(context.model_dump_json())
+
+    assert restored == context
+    assert restored.turn_sections == {2: ["Seats: 4."], 0: ["Their plan is gold.", "They owe 3."]}
+    assert restored.turn_lines() == ["Their plan is gold.", "They owe 3.", "Seats: 4."]
+
+
+def test_a_context_without_per_turn_data_has_no_turn_lines() -> None:
+    context = _context()
+
+    assert context.turn_sections == {}
+    assert context.turn_lines() == []
+
+
+def test_a_top_level_key_a_newer_writer_added_is_ignored() -> None:
+    """A reader one build behind must load what a newer worker wrote, not rebuild it from the calls row."""
+    context = _context(variables={"plan": "gold"}, context_sections=["Their plan is gold."])
+    written = json.loads(context.model_dump_json())
+    written["next_build_field"] = {"anything": [1, 2]}
+
+    restored = CallContext.model_validate_json(json.dumps(written))
+
+    assert restored == context
+    assert "next_build_field" not in restored.model_dump()
+    assert (restored.variables, restored.context_sections) == ({"plan": "gold"}, ["Their plan is gold."])
 
 
 @pytest.mark.parametrize(
     "over",
     [
-        {"unexpected": 1},
         {"version": 2},
         {"direction": "sideways"},
         {"created_at": datetime(2026, 11, 1, 12)},  # noqa: DTZ001 - a naive datetime is the invalid input
+        {"config": {**resolved_config(), "unexpected": 1}},
+        {"memory": {"memory_id": MEMORY_ID, "unexpected": 1}},
+        {"memory": {"memory_id": MEMORY_ID, "facts": [{"key": "a", "value": 1, "unexpected": 1}]}},
     ],
-    ids=["extra-key", "version", "direction", "naive-time"],
+    ids=["version", "direction", "naive-time", "config-extra-key", "memory-extra-key", "fact-extra-key"],
 )
 def test_invalid_contexts_are_rejected(over: dict[str, Any]) -> None:
     with pytest.raises(ValidationError):

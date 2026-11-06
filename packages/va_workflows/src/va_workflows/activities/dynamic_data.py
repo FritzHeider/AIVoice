@@ -1,10 +1,12 @@
-"""Pre-call dynamic data of ``prefetch_call_context`` (specs/13 §7 Decision P08-T03a).
+"""Pre-call dynamic data of ``prefetch_call_context`` (specs/13 §7 Decisions P08-T03a and P08-T03b).
 
-:meth:`PreCallDynamicData.fetch` runs the call's ``timing: "pre_call"`` fetches (concurrently, each rendered
-in the same scope: the call's variables, ``request_data`` and built-ins) within
+:meth:`PreCallDynamicData.fetch` runs every ``dynamic_data`` fetch of the call, whatever its ``timing``
+(concurrently, each rendered in the same scope: the call's variables, ``request_data`` and built-ins), within
 :data:`~va_tools.dynamic_data.PRE_CALL_BUDGET_S` and returns the context with the variables and context lines
-merged in. The requests carry ``User-Agent`` and ``X-VA-Call-Id`` and are not signed; the answers may come
-from the org's ``dyn:`` cache.
+merged in: the merged lines of the ``timing: "pre_call"`` entries in ``context_sections``, the lines of each
+``timing: "every_turn"`` entry under its index in ``turn_sections`` (the first value of what the media worker
+refreshes at every caller turn). The requests carry ``User-Agent`` and ``X-VA-Call-Id`` and are not signed;
+the answers may come from the org's ``dyn:`` cache.
 
 :meth:`PreCallDynamicData.record`, called once the context is saved, writes one ``call.dynamic_data`` event
 per fetch (level ``warning`` for a failed one) and merges the variables into ``calls.variables`` in one
@@ -75,9 +77,9 @@ class PreCallDynamicData:
         self._allow_http = allow_http
 
     async def fetch(self, context: CallContext) -> PreCallData:
-        """``context`` with the results of its pre-call fetches merged in (unchanged when it has none)."""
+        """``context`` with the results of its dynamic data fetches merged in (unchanged when it has none)."""
         config = context.config
-        specs = [(index, spec) for index, spec in enumerate(config.dynamic_data) if spec.timing == "pre_call"]
+        specs = list(enumerate(config.dynamic_data))
         if not specs:
             return PreCallData(context)
         scope = TemplateScope(
@@ -93,11 +95,18 @@ class PreCallDynamicData:
         results = await fetcher.fetch_all(
             specs, scope, timeout_ms=PRE_CALL_TIMEOUT_MS, budget_s=PRE_CALL_BUDGET_S
         )
-        variables, lines = merge_results(results)
+        variables, _ = merge_results(results)
+        _, lines = merge_results([result for result in results if result.timing == "pre_call"])
+        turn_sections = {
+            result.index: list(result.sections.values())
+            for result in results
+            if result.timing == "every_turn" and result.sections
+        }
         merged = context.model_copy(
             update={
                 "variables": {**context.variables, **variables},
                 "context_sections": [*context.context_sections, *lines],
+                "turn_sections": {**context.turn_sections, **turn_sections},
             }
         )
         return PreCallData(merged, tuple(results))

@@ -16,15 +16,19 @@ from typing import Any
 
 import orjson
 import pytest
-from dialogue_helpers import FakeSource, counter
+from dialogue_helpers import FakeSource
 from pipeline_harness import Harness, harness
-from task_helpers import RecordingExecutor, assert_tool_pairing, drain, task_context, user_turn
+from task_helpers import (
+    RecordingExecutor,
+    assert_tool_pairing,
+    drain,
+    scripted_brain,
+    task_context,
+    user_turn,
+)
 
 from va_common.time import Clock, FrozenClock
-from va_domain.org import OrgSettings
 from va_engine.models.results import PressButton, TransferRequest
-from va_engine.models.state import EngineState
-from va_engine.system_tools import facts_for_call
 from va_engine.task_runner import TaskBrain
 from va_engine.task_tools import IN_PROGRESS, INTERRUPTED
 from va_llm.models import ToolCall, ToolDef
@@ -66,21 +70,14 @@ def _brain(  # noqa: PLR0913 - test knobs, all keyword-only
     **config: Any,
 ) -> TaskBrain:
     context = task_context(first_sentence="Hi, this is Maya.", **config)
-    settings = OrgSettings.model_validate({"engine": {"tool_fillers": fillers}})
-
-    def keep(state: EngineState) -> None:
-        if states is not None:
-            states.append(dict(state.variables))
-
-    return TaskBrain(
-        context=context,
-        settings=settings,
-        gateway=source,
-        counter=counter(),
-        facts=facts_for_call(context, settings, sms_capable=sms_capable),
+    return scripted_brain(
+        context,
+        source,
         clock=clock,
         executor=executor,
-        on_state=keep,
+        fillers=fillers,
+        states=states,
+        sms_capable=sms_capable,
     )
 
 

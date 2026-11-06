@@ -16,7 +16,8 @@ alone, specs/06 §5 Decision P05-T02 item 7). Steps, in order:
    ``completed``/``transferred`` on the primary hangup, ``CallWorkflow`` releases the slot). Any other end
    keeps its reason and hangs up.
 2. **Variables** of a pathway call, or of a task call with custom tools (their extractions, specs/13 §5
-   Decision P08-T02b1): the final engine snapshot (``call:{id}:engine``, written by the runtime
+   Decision P08-T02b1) or per-turn dynamic data (its refreshed values, specs/13 §7 Decision P08-T03b): the
+   final engine snapshot (``call:{id}:engine``, written by the runtime
    before the session body returned) is read and its variables are merged into ``calls.variables``
    (``stored || final``), whatever ends the call (specs/11 §9; specs/11 §10 Decision P07-T12b). A missing or
    unreadable snapshot merges nothing.
@@ -367,8 +368,10 @@ class CallEnd:
 
 
 def _keeps_engine_state(context: CallContext) -> bool:
-    """Whether the runtime snapshots the call's engine state (pathway calls, task calls with tools)."""
+    """Whether the runtime snapshots the call's engine state (pathway calls, task calls with tools or
+    ``timing: "every_turn"`` dynamic data)."""
     config = context.config
     if config.runner_type == "pathway":
         return True
-    return config.runner_type == "task" and bool(config.tool_ids or config.inline_tools)
+    per_turn = any(spec.timing == "every_turn" for spec in config.dynamic_data)
+    return config.runner_type == "task" and bool(config.tool_ids or config.inline_tools or per_turn)

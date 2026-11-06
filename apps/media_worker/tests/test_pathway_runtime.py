@@ -22,6 +22,7 @@ from sms_rows import add_sms_number, random_e164
 from sqlalchemy import select
 from tenant_rows import OrgFactory, open_database
 from tools_helpers import GatedSystem
+from turn_data_fakes import FakeTurnData
 
 from va_common.ids import new_id
 from va_db.models import Message
@@ -35,6 +36,7 @@ from va_engine.pathway_brain import PathwayBrain
 from va_engine.pathway_call import ENGINE_STATE_TTL_S, engine_state_key
 from va_engine.ports import SmsOutcome, SmsRequest
 from va_engine.system_tools import SystemToolFacts, facts_for_call
+from va_engine.turn_data import TurnData
 from va_llm.tokens import default_counter
 from va_media.call_sms import CallSmsPort, OutboundSms, agent_number, counterpart_number
 from va_media.call_tools import CallToolSource, PathwayCallTools
@@ -48,6 +50,7 @@ from va_media.pathway_runtime import (
 )
 from va_pathways.call_graphs import CallGraphCache
 from va_tools.executor import SystemOutcome
+from va_voice.pipeline.models import BrainOutput, SpeakText, UserTurn
 
 EDGE = "edge.test:8100"
 
@@ -253,6 +256,7 @@ def _brain(  # noqa: PLR0913 - what one built brain varies in
     gateway: FakeSource | None = None,
     call_tools: PathwayCallTools | None = None,
     system_tools: SystemToolFacts | None = None,
+    turn_data: TurnData | None = None,
 ) -> PathwayBrain:
     return build_pathway_brain(
         context,
@@ -268,7 +272,43 @@ def _brain(  # noqa: PLR0913 - what one built brain varies in
         saver=None,
         call_tools=call_tools,
         system_tools=system_tools,
+        turn_data=turn_data,
     )
+
+
+async def test_the_brain_refreshes_the_call_s_per_turn_data_at_a_caller_turn() -> None:
+    """specs/13 §7 Decision P08-T03b: the engine refreshes the port, the reply prompt reads its lines."""
+    active = _reply_graph()
+    state = new_pathway_state(active)
+    context = call_context(new_id(), runner_type="pathway").model_copy(
+        update={"context_sections": ["The customer is Ana."], "turn_sections": {0: ["stale"]}}
+    )
+    org = OrgSettings.model_validate({"engine": {"speculative": False}})
+    source = FakeSource().reply("Hello.").reply("You are on platinum.")
+    port = FakeTurnData(lines=("Their plan is gold.",)).then({"plan": "platinum"}, "Their plan is platinum.")
+    brain = _brain(context, org, active, state, gateway=source, turn_data=port)
+
+    await _drained(brain.start())
+    opener = source.requests[0].messages[0].content or ""
+    turn = UserTurn(index=1, text="which plan am I on", start_ms=1000.0, end_ms=1600.0)
+    await _drained(brain.on_user_turn(turn))
+    await brain.aclose()
+
+    assert opener.endswith("\n\n## Context\nThe customer is Ana.\nTheir plan is gold.")
+    assert port.scopes == [{}]
+    assert state.variables == {"plan": "platinum"}
+    system = source.requests[-1].messages[0].content or ""
+    assert "- plan: platinum" in system
+    assert system.endswith("\n\n## Context\nThe customer is Ana.\nTheir plan is platinum.")
+
+
+async def _drained(outputs: AsyncIterator[BrainOutput]) -> list[str]:
+    """Consume a brain's outputs like the pipeline (streams read before resuming); the streamed texts."""
+    spoken: list[str] = []
+    async for output in outputs:
+        if isinstance(output, SpeakText):
+            spoken.append("".join([token async for token in output.tokens]))
+    return spoken
 
 
 def test_the_brain_runs_on_the_given_graph_and_state() -> None:

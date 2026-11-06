@@ -25,10 +25,13 @@ from resolved_configs import resolved_config
 from va_common.time import Clock, FrozenClock
 from va_domain.call_context import CallContext
 from va_domain.org import OrgSettings
+from va_engine.dialogue import DialogueSource
+from va_engine.models.state import EngineState
 from va_engine.system_tools import SystemToolFacts, facts_for_call
 from va_engine.task_runner import TaskBrain
 from va_engine.templating import TemplateScope
-from va_engine.tool_executor import ToolAnswer, ToolRef
+from va_engine.tool_executor import ToolAnswer, ToolExecutor, ToolRef
+from va_engine.turn_data import TurnData
 from va_llm.models import ToolCall, ToolDef
 from va_llm.tokens import default_counter
 from va_sim.state import SimState
@@ -44,6 +47,7 @@ __all__ = [
     "Sim",
     "assert_tool_pairing",
     "drain",
+    "scripted_brain",
     "served",
     "task_context",
     "tool_messages",
@@ -72,6 +76,38 @@ def task_context(
             "variables": dict(variables or {}),
             "created_at": NOW,
         }
+    )
+
+
+def scripted_brain(  # noqa: PLR0913 - test knobs, all keyword-only
+    context: CallContext,
+    source: DialogueSource,
+    *,
+    clock: Clock,
+    executor: ToolExecutor | None = None,
+    fillers: bool = True,
+    states: list[dict[str, Any]] | None = None,
+    sms_capable: bool = False,
+    turn_data: TurnData | None = None,
+) -> TaskBrain:
+    """A :class:`TaskBrain` of ``context`` over a scripted dialogue source (no socket); the variables of
+    every state it reports are appended to ``states``."""
+    settings = OrgSettings.model_validate({"engine": {"tool_fillers": fillers}})
+
+    def keep(state: EngineState) -> None:
+        if states is not None:
+            states.append(dict(state.variables))
+
+    return TaskBrain(
+        context=context,
+        settings=settings,
+        gateway=source,
+        counter=default_counter(),
+        facts=facts_for_call(context, settings, sms_capable=sms_capable),
+        clock=clock,
+        executor=executor,
+        on_state=keep,
+        turn_data=turn_data,
     )
 
 

@@ -102,8 +102,11 @@ binary available to the media worker and worker (custom code nodes, `13-tools-an
    > `SendCallConfig` fields (the dispatch `pricing` snapshot and other non-config keys are dropped) and is stored
    > with spec field names (`by_alias`, e.g. `voicemail.sms.from`). The row's `to_number`/`from_number` win; the
    > configuration fills NULL columns. `trace_context` carries the W3C trace headers injected in the activity.
-   > `variables`/`context_sections` are filled by the pre-call dynamic data (specs/13 §7 Decision P08-T03a: every
-   > `timing: "pre_call"` entry is fetched, cached or not, before the opener is rendered); `memory` (specs/20
+   > `variables`/`context_sections`/`turn_sections` are filled by the pre-call dynamic data (specs/13 §7 Decisions
+   > P08-T03a and P08-T03b: every entry is fetched, cached or not and whatever its `timing`, before the opener is
+   > rendered; the lines of `timing: "every_turn"` entries go to `turn_sections`; a reader ignores top-level
+   > keys it does not know, specs/13 §7 Decision P08-T03b item 1, while `config` and the nested models refuse
+   > them); `memory` (specs/20
    > §2.3, P13-T01) stays empty until its producer exists; the first-sentence pre-render (`opener_text` plus the
    > phrase cache entries) is specs/07 §11 Decision P05-T10d. The activity
    > (`va_workflows.activities.call_context`, timeout 20 s, 3 attempts, 1 s → 5 s backoff) stores nothing for a

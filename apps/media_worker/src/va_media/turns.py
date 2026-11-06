@@ -25,6 +25,10 @@ Task-mode tools (specs/13 §5 Decision P08-T02b1): the recorder is the call's
 :meth:`TurnRecorder.sms_sent` publishes the ``call.sms_sent`` of the ``send_sms`` tool (message
 :data:`TOOL_SMS_SENT_MESSAGE`, Decision P08-T02b2).
 
+Per-turn dynamic data (specs/13 §7 Decision P08-T03b): the recorder is the call's
+:class:`~va_tools.turn_data.DynamicDataEvents`: :meth:`TurnRecorder.dynamic_data` publishes one
+``call.dynamic_data`` per fetch of a turn's refresh (the message, data and level of the pre-call events).
+
 Times: ``start_ms``/``end_ms`` are relative to the call's answer time: ``pipeline_ms - origin_ms +
 answered_offset_ms`` (rounded, at least 0), where ``origin_ms`` is the pipeline clock when the recorder was
 built and ``answered_offset_ms`` how long before that the carrier reported the answer (0 when unknown).
@@ -48,6 +52,7 @@ from va_domain.call_context import CallContext
 from va_engine.pathway_brain import TurnTags
 from va_events import DomainEvent, EventType, new_event
 from va_media.pathway_events import PATHWAY_EVENT_TYPES, event_message
+from va_tools.dynamic_data import DynamicDataResult
 from va_voice.latency import TurnReport
 from va_voice.pipeline import AgentTurn, InterruptRecord, UserTurn
 
@@ -225,6 +230,10 @@ class TurnRecorder:
     def sms_sent(self, data: dict[str, JsonValue]) -> None:
         """Publish ``call.sms_sent`` for a message the ``send_sms`` tool sent."""
         self._publish(EventType.CALL_SMS_SENT, TOOL_SMS_SENT_MESSAGE, data)
+
+    def dynamic_data(self, result: DynamicDataResult) -> None:
+        """Publish ``call.dynamic_data`` for one per-turn fetch (level ``warning`` for a failed one)."""
+        self._publish(EventType.CALL_DYNAMIC_DATA, result.message(), result.event_data(), level=result.level)
 
     async def drain(self) -> None:
         """Release a held assistant turn, then wait until every queued event was published (or failed)."""

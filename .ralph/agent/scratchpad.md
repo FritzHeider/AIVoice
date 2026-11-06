@@ -773,3 +773,659 @@ orjson TypeError. NOT verified: that such a value reaches a webhook payload and 
 
 **APPROVED.** Task ticked in plan/phase-08.md; next for the Planner: P08-T03b (every_turn), then P08-T03c
 (inbound budget). Open runtime tasks: `fix:http-body-big-int`, `fix:webhook-body-big-int` (both P4, same family).
+
+## Planner 2026-11-05T22:55Z: after P08-T03a (commit a7f35b8)
+
+Inbox: every note in `.ralph/review-inbox/` is in DONE (checked with `comm`). Work tree clean. Next unticked,
+unblocked task: **P08-T03b** (depends on P08-T03a, ticked). Runtime tasks `fix:http-body-big-int` and
+`fix:webhook-body-big-int` (both P4, pre-existing serializer family) stay open; not part of this task.
+
+## Plan P08-T03b (per-turn dynamic data, `timing: "every_turn"`)
+
+Read: specs/13 §7 + Decision P08-T03a, `va_tools/dynamic_data.py`, `va_workflows/activities/dynamic_data.py`,
+`va_engine/task_runner.py`, `engine.py` (`handle_user_turn`/`_converse`/`_pass`/`_prepare`), `speculative.py`,
+`prompt.py`, `voice_inputs.py`, `pathway_brain.py`, media `runtime.py`/`call_tools.py`/`pathway_runtime.py`/
+`turns.py`, `va_domain/call_context.py`. Design decision recorded as DEC-019 (confidence 70).
+
+### Semantics (goes into specs/13 §7 as `> Decision (2026-11-05) P08-T03b`)
+
+1. **First value.** The pre-call phase fetches EVERY `dynamic_data` entry, whatever its `timing` (amends the
+   T03a sentence "the `timing: "pre_call"` specs"): the opener, the first prompt and the stale fallback need a
+   value. Variables of all entries merge as in T03a. Lines: `context_sections` = merged lines of the `pre_call`
+   entries only; the lines of each `every_turn` entry go to the new `CallContext.turn_sections[index]`.
+2. **Refresh.** At the start of each user turn (speech or keypad; not the opener, not a `wait_for_greeting`
+   greeting, not a no-input/wait timeout, not chained passes or tool rounds) every `every_turn` entry is fetched
+   again, all concurrently in one scope (the call's current variables, `request_data`, built-ins), each request
+   with `timeout_ms` 800, the whole refresh within 0.8 s of the call clock. Cache rules are T03a's (`cache:
+   true` → usually a Redis hit; the media worker uses the same Redis as the worker, so entries are shared).
+3. **Result.** A successful fetch: its variables are merged over the call's variables and its lines replace
+   that fetch's earlier lines wholesale (a variable the answer no longer has keeps its value, rule 4 of T03a
+   "null sets nothing", and loses its line). A failed or timed-out fetch changes nothing (stale value).
+   Variables are never unset. `## Context` = the pre-call lines, then the turn lines in `dynamic_data` order;
+   two entries of different timing setting one name both keep their line.
+4. **Where the turn waits.** Pathway calls: the refresh runs concurrently with the turn's decision calls and
+   speculation; the node is executed after both finished (so at most `max(decision, 0.8 s)`); the decision
+   itself sees the previous values. Refreshed variables merge BEFORE the turn's extraction (extraction and tool
+   variables of the turn win a shared name). A refresh that changed a variable value or a turn line discards
+   the speculative reply (`prompt_changed`); an unchanged one keeps it. Task calls have no routing step: the
+   turn's first request waits for the refresh (≤ 0.8 s; a cache hit costs one Redis GET).
+5. **Cut.** A turn cut while the refresh runs (barge-in merge, superseded turn) cancels the fetches: nothing is
+   merged, no event is written; the next turn refreshes again.
+6. **Events/state.** One `call.dynamic_data` per fetch per turn from the media worker through the call's
+   `TurnRecorder` (same message/data/level as T03a, `timing: "every_turn"`). Refreshed variables are in the
+   engine state snapshot (`on_state`); a task call with `every_turn` entries gets the snapshot saver even
+   without tools, so the end routine merges them into `calls.variables`. Turn lines are NOT in `EngineState`
+   (no schema bump: a voice call never resumes from a snapshot).
+7. Inbound calls have no pre-call fetch until P08-T03c; their `every_turn` entries get their first value at
+   the first user turn. A context rebuilt from the `calls` row has no lines; same.
+
+### 1. va_domain — `packages/va_domain/src/va_domain/call_context.py`
+- `CallContext.turn_sections: dict[int, list[str]] = Field(default_factory=dict)` (after `context_sections`;
+  docstring: lines of each `every_turn` entry by its `dynamic_data` index) and
+  `def turn_lines(self) -> list[str]` (all lines, ascending index). `CALL_CONTEXT_VERSION` stays 1.
+- Tests (`packages/va_domain/tests/test_call_context.py`): default empty; JSON round trip (`model_dump_json`
+  → `model_validate_json`) keeps int keys; `turn_lines()` order is by index, not insertion.
+
+### 2. va_engine — the port
+New `packages/va_engine/src/va_engine/turn_data.py` (import-light: templating + pydantic only):
+```python
+class TurnData(Protocol):
+    def sections(self) -> tuple[str, ...]: ...                                  # the turn lines now
+    async def refresh(self, scope: TemplateScope) -> Mapping[str, JsonValue]: ...  # variables of the ok fetches
+async def refresh_turn(port: TurnData | None, scope: TemplateScope) -> Mapping[str, JsonValue]
+    # {} without a port; any Exception → log `engine.turn_data_failed` (error_type) → {}; CancelledError passes
+def merge_refreshed(variables: dict[str, JsonValue], refreshed: Mapping[str, JsonValue]) -> bool
+    # update in place; True when a name was new or its value differed
+```
+- `voice_inputs.voice_prompt_inputs(..., turn_sections: Sequence[str] | None = None)`:
+  `context_sections=(*context.context_sections, *(context.turn_lines() if turn_sections is None else turn_sections))`.
+- `task_runner.TaskBrain(..., turn_data: TurnData | None = None)`:
+  - `on_user_turn`: after `_accept(turn)`: `refreshed = await refresh_turn(self._turn_data, self._scope())`;
+    `if merge_refreshed(self._state.variables, refreshed) and self._on_state: self._on_state(self._state)`;
+    then `_respond()`. State changes only after the await (a cancelled refresh leaves no trace). `start()`
+    does not refresh.
+  - `_request`: pass `turn_sections=None if self._turn_data is None else self._turn_data.sections()`.
+- `prompt.py`: `DialogueSettings.turn_sections: tuple[str, ...] = ()` (`for_call`: `tuple(context.turn_lines())`);
+  `PathwayPrompt(settings, *, counter, clock, turn_data: TurnData | None = None)`; `system()` uses
+  `(*settings.context_sections, *(settings.turn_sections if port is None else port.sections()))`.
+- `engine.py`: `EnginePorts.turn_data: TurnData | None = None`.
+  - `handle_user_turn` → `_converse(run, latest=, history=, refresh=True)`; `_converse(..., refresh: bool =
+    False)` calls `self._pass(run, latest, history, refresh=refresh and chained == 0)`; `start`/
+    `on_wait_timeout`/the max_total_turns protection path never refresh.
+  - `_pass(..., *, refresh: bool)`: `before = self._turn_sections()` (port's `sections()` or `()`) BEFORE the
+    task group; inside the group `refreshed = group.create_task(refresh_turn(port, self._ctx(node).scope()))`
+    when `refresh` and a port exists; AFTER the group (synchronously, before `_schedule_background`/`_apply`):
+    `changed = merge_refreshed(self.state.variables, refreshed.result()) or self._turn_sections() != before`;
+    `_resolve_speculation(stays=..., prompt_changed=suffix is not None or changed)`. Do NOT merge inside the
+    task: `Speculation.start` takes its variable snapshot after an await, a merge in between would hide the
+    change from `resolve`.
+  - Keep `_pass` complexity down (radon): put the group in a small helper if needed.
+- Module docstrings of `task_runner`, `engine` (turn flow), `prompt`, `voice_inputs` get one sentence each.
+
+### 3. va_tools — `packages/va_tools/src/va_tools/turn_data.py` (new)
+```python
+TURN_TIMEOUT_MS: Final = 800
+TURN_BUDGET_S: Final = 0.8
+class DynamicDataEvents(Protocol):
+    def dynamic_data(self, result: DynamicDataResult) -> None: ...
+def turn_specs(dynamic_data: Sequence[DynamicDataSpec]) -> list[tuple[int, DynamicDataSpec]]   # every_turn only
+class TurnDynamicData:      # satisfies va_engine.turn_data.TurnData
+    def __init__(self, fetcher: DynamicDataFetcher, specs: Sequence[tuple[int, DynamicDataSpec]], *,
+                 initial: Mapping[int, Sequence[str]] | None = None, events: DynamicDataEvents | None = None)
+    def sections(self) -> tuple[str, ...]            # per spec in index order: its current lines
+    async def refresh(self, scope: TemplateScope) -> dict[str, JsonValue]
+```
+`refresh`: `results = await fetcher.fetch_all(specs, scope, timeout_ms=TURN_TIMEOUT_MS, budget_s=TURN_BUDGET_S)`;
+then, with no await in between, for each result in order: `events.dynamic_data(result)`; if not failed:
+`self._lines[result.index] = tuple(result.sections.values())` and `variables.update(result.variables)`.
+`initial` lines of indexes that are not `every_turn` specs are ignored. No change to `dynamic_data.py` beyond
+what jscpd/typing needs (do not touch the big-int behaviour).
+
+### 4. va_workflows — `activities/dynamic_data.py`
+`PreCallDynamicData.fetch`: specs = all entries; `variables, _ = merge_results(results)`; `lines =
+merge_results([r for r in results if r.timing == "pre_call"])[1]`; `turn_sections = {r.index:
+list(r.sections.values()) for r in results if r.timing == "every_turn" and r.sections}`; `model_copy(update=
+{variables, context_sections, turn_sections})`. `record` unchanged (events carry the spec's timing).
+
+### 5. Media worker
+- `apps/media_worker/src/va_media/turns.py`: `TurnRecorder.dynamic_data(self, result: DynamicDataResult)` →
+  `_publish(EventType.CALL_DYNAMIC_DATA, result.message(), result.event_data(), level=result.level)`.
+- New `apps/media_worker/src/va_media/call_dynamic_data.py`:
+  ```python
+  @dataclass(frozen=True, slots=True)
+  class TurnDataSource:               # per process
+      tools_http: httpx.AsyncClient; allow_http: bool; redis: Redis | None; clock: Clock
+      def for_call(self, context: CallContext, events: DynamicDataEvents | None) -> TurnDynamicData | None
+  ```
+  `None` when the call has no `every_turn` entry; else `HttpExecutor(tools_http, clock=, allow_http=,
+  call_id=str(context.call_id))` (unsigned, as T03a) → `DynamicDataFetcher(http, redis=, org_id=, clock=)` →
+  `TurnDynamicData(fetcher, turn_specs(config.dynamic_data), initial=context.turn_sections, events=events)`.
+- `runtime.py`: `CallRuntime(..., turn_data: TurnDataSource | None = None)`; `_task_brain`/`_pathway_brain`
+  build `turn = None if source is None else source.for_call(context, recorder)`; TaskBrain gets `turn_data=`,
+  and its `EngineStateSaver` is created when `executor is not None or turn is not None` (and Redis exists).
+  `pathway_runtime.build_pathway_brain(..., turn_data: TurnData | None = None)` → `PathwayPrompt(...,
+  turn_data=)` and `EnginePorts(turn_data=)`. `open_runtime`: `turn_data=TurnDataSource(tools_http=tools_http,
+  allow_http=insecure_urls_allowed(settings.va_env), redis=container.redis, clock=clock)`. Module docstring
+  list of `runtime.py` gets item 13. No bound method of an owner is handed to a part (GC rule, AGENTS
+  P08-FIX-3): the prompt and the engine hold the `TurnDynamicData` object, which holds fetcher + recorder only.
+- `tests/support/runtime_rig.sim_runtime(turn_data: TurnDataSource | None = None)`.
+
+### 6. Specs / docs (same commit)
+- specs/13 §7: Decision P08-T03b (the 7 rules above, constants, module names); in Decision P08-T03a mark the
+  "`timing: "pre_call"` specs" sentence and "`every_turn` (P08-T03b)" pointer as amended by T03b rule 1.
+- specs/01 §2.1 Decision (line ~105): "every `timing: "pre_call"` entry is fetched" → every entry;
+  `turn_sections` named next to `variables`/`context_sections`.
+- specs/10 §5 Decision P08-T03a addendum: block = `context_sections` then the turn lines.
+- AGENTS.md: one dated P08-T03b bullet (port, modules, test fakes, the FrozenClock/ManualClock note for
+  `TurnDynamicData`, saver rule). Run `check_spec_refs`.
+
+### 7. Tests (names + what they assert)
+- `packages/va_tools/tests/test_turn_data.py` (ManualClock, `tools_helpers.plain_executor()` + respx,
+  fakeredis; reuse the `_fetching_all`-style helper pattern of `test_dynamic_data.py`, no copied setup: jscpd):
+  `test_a_refresh_sets_the_variables_and_replaces_that_fetch_s_lines`,
+  `test_a_fetch_over_the_budget_keeps_the_stale_lines_and_sets_nothing` (hanging respx side effect;
+  `wait_for_sleep(0.8)` + `run_for(0.8)`; event `timeout`/`warning`; the request was cancelled),
+  `test_a_fast_fetch_counts_when_another_runs_out_of_time`,
+  `test_a_failed_refresh_keeps_the_earlier_lines` (500 → `http_error`),
+  `test_a_cached_answer_is_used_without_a_request` (second refresh: no new request, event `cached`; key
+  deleted → a request again),
+  `test_a_variable_the_answer_no_longer_has_loses_its_line` (not in the returned variables),
+  `test_one_event_per_fetch_in_dynamic_data_order`, `test_only_every_turn_entries_are_refreshed`
+  (`turn_specs`, `initial` of a pre-call index ignored),
+  `test_a_cancelled_refresh_changes_nothing_and_reports_nothing`.
+- `packages/va_engine/tests/support/turn_data_fakes.py`: `FakeTurnData(script=[(variables, lines) | Exception],
+  hold: asyncio.Event | None)` recording `scopes`, `started`, `cancelled`.
+- `packages/va_engine/tests/test_turn_data.py`: `refresh_turn` (no port → {}; raising port → {} + log
+  `engine.turn_data_failed`; cancellation passes), `merge_refreshed` (new / changed / equal).
+- `packages/va_engine/tests/test_task_turn_data.py` (TaskBrain over `dialogue_helpers.FakeSource`):
+  the turn's request carries the refreshed line under `## Context` and the variable in Known information;
+  refresh happens before the request and once per turn (not per tool round, with `RecordingExecutor`);
+  `start()` with and without a greeting does not refresh; without a port the lines are
+  `context.turn_sections`; a raising port → the reply goes on with the earlier lines; `on_state` receives the
+  refreshed variables; a turn cancelled while the port is held merges nothing and the next turn refreshes.
+- `packages/va_engine/tests/test_engine_turn_data.py` (`engine_rig(turn_data=FakeTurnData(...))`, add the knob
+  to `engine_helpers.engine_rig` → `EnginePorts`/`PathwayPrompt` via `dialogue_rig`):
+  refresh starts while the router is still gated (`KeyedPort.gates`) and the node runs only after both;
+  reply prompt has the refreshed line + variable, node `text` `{{var}}` renders the refreshed value;
+  once per user turn (chained passes, `start()`, `on_wait_timeout`, max_total_turns protection: none);
+  a changed refresh discards the speculation (`prompt_changed`: a second, non-speculative request), an
+  unchanged one commits it; the turn's extraction wins a shared name; a raising port → the turn goes on.
+- `test_prompt.py` (+2): turn lines follow the static ones; fallback to `settings.turn_sections`.
+  `test_voice_inputs.py` (+1): `turn_sections` param and the context fallback.
+- `packages/va_workflows/tests/test_prefetch_dynamic_data.py` (+2): an `every_turn` entry is fetched pre-call
+  (variable in the context and the opener, lines under `turn_sections[index]`, not in `context_sections`,
+  event `timing: every_turn`); mixed entries keep T03a behaviour for the `pre_call` ones.
+- `apps/media_worker/tests/test_call_dynamic_data.py`: `for_call` → `None` without `every_turn`; initial lines
+  from the context; a refresh over a respx/receiver endpoint publishes `call.dynamic_data` through a real
+  `TurnRecorder` (warning for a failure). `test_pathway_runtime.py` (+1): `build_pathway_brain(gateway=
+  FakeSource(), turn_data=fake)` → after a user turn `source.requests[-1]` system prompt has the line.
+- `apps/media_worker/tests/test_runtime_dynamic_data_sim.py` (acceptance; `sim_backends` + `sim_runtime(
+  turn_data=TurnDataSource(tools_http, allow_http=True, redis, SystemClock()))`, task call WITHOUT tools,
+  `dynamic_data=[{url: receiver, timing: every_turn, response_data: [{name: plan, data: $.plan, context:
+  "Their plan is {{plan}}."}]}]`, receiver scripted `gold` then `platinum`, a two-utterance scenario,
+  `wait_for_greeting=False`): FakeLLM request of user turn 1 has "Their plan is gold.", of turn 2 "Their plan
+  is platinum." and not gold; two `call.dynamic_data` rows (`every_turn`) in `call_events`; after the end
+  routine `calls.variables["plan"] == "platinum"` (proves the saver for a tool-less task call).
+- GC guard: if an existing runtime `gc_cycles` test covers a call's parts, extend it to a call with turn data
+  (grep `unreachable_after` in `apps/media_worker/tests`).
+
+### 8. Gates (all; `make test` then `make e2e`, background + heartbeat, ~15 min + ~7 min)
+`make fmt lint typecheck placeholders`; `uv run python scripts/check_spec_refs.py`;
+`uv run python scripts/check_openapi_drift.py`; `npx --yes jscpd@4 --silent`; `uvx radon cc -s -a`;
+pip-audit on the CI export; `corepack pnpm audit --audit-level high`; `make test`; `make e2e` (the outbound
+prefetch and the media runtime change). PATH needs `/home/ralph/.local/bin`.
+
+### 9. Risks
+- `_pass` must not merge inside the refresh task (speculation snapshot race, see §2); test both speculation
+  outcomes.
+- `fetch_all` is bounded by `within` on the clock: `FrozenClock`/`RecordingClock` time every refresh out at
+  once → va_tools tests use `ManualClock`, runtime tests `SystemClock`; engine tests use the fake port.
+- pydantic int keys of `turn_sections` through JSON (round-trip test); `extra="forbid"` contexts written by a
+  NEW worker and read by an OLD media pod would fail, irrelevant here (one deploy), note it in the Decision.
+- mypy: `TurnDynamicData` must satisfy the `TurnData` protocol structurally (return `Mapping`-compatible).
+- jscpd: share the fake port and the request/assert helpers; no copied respx setup.
+- Task-mode latency: only calls with `every_turn` entries wait, at most 0.8 s; documented in rule 4.
+- Do not change `HttpExecutor`/`ToolRunner` big-int behaviour (`fix:http-body-big-int`).
+
+## Build P08-T03b (Builder, 2026-11-05T23:00Z-)
+
+Implemented the plan as written, with these additions/deviations (all in the diff, none changes the 7 rules):
+
+1. **End routine (plan gap).** `va_media.call_end._keeps_engine_state` decided by `tool_ids`/`inline_tools`
+   only, so a tool-less task call with `every_turn` entries wrote its snapshot but the end routine never
+   read it. The runtime sim acceptance test caught it (`calls.variables` kept the old value). Now the
+   predicate is also true for a task call with an `every_turn` entry; unit test
+   `test_a_task_call_s_snapshot_is_merged_only_when_it_refreshes_per_turn_data` (every_turn / pre_call only /
+   none).
+2. `TurnDynamicData.refresh` updates lines + variables first, then reports the fetches; a reporter that
+   raises is logged `tools.turn_data_event_failed` and costs the turn nothing (test).
+3. `merge_refreshed` always assigns and reports "changed" by Python equality (same comparison as the
+   speculation's own variable snapshot).
+4. `PathwayEngine`: the task group moved to `_decide(node, inputs, refresh=)` (returns the decision and the
+   refreshed variables, never merges); `_pass` merges after it, before `_apply`. `_converse` clears `refresh`
+   after the first loop round (radon: `_converse` stays B 10).
+5. Test support moved to shared modules for jscpd (0 clones): `tools_helpers.HeldAnswer`/`manual_fetcher`/`ORG`
+   (test_dynamic_data uses them), `task_helpers.scripted_brain` (test_task_tool_speech uses it),
+   `recorder_helpers` (media; test_turns imports it), `runtime_rig.run_human_call` (tools sim uses it).
+6. `test_every_turn_specs_are_not_fetched_before_the_call` (T03a) is replaced by
+   `test_an_every_turn_entry_gets_its_first_value_before_the_call` + `test_mixed_entries_keep_their_lines_apart`
+   (rule 1 amends T03a).
+
+Files (src): `va_domain/call_context.py` (`turn_sections`, `turn_lines()`), `va_engine/turn_data.py` (new),
+`va_engine/{task_runner,engine,prompt,voice_inputs}.py`, `va_tools/turn_data.py` (new),
+`va_workflows/activities/dynamic_data.py`, `va_media/{call_dynamic_data.py (new),runtime.py,pathway_runtime.py,
+turns.py,call_end.py}`. Specs: 13 §7 Decision P08-T03b (+ T03a pointer), 01 §2.1, 10 §5 addendum. AGENTS.md
+bullet.
+
+Tests (new files): `va_tools/tests/test_turn_data.py` (11), `va_engine/tests/test_turn_data.py` (9),
+`test_task_turn_data.py` (7), `test_engine_turn_data.py` (9), `media_worker/tests/test_call_dynamic_data.py`
+(2), `test_runtime_dynamic_data_sim.py` (2: refreshed prompt of turn 2 + events + snapshot + `calls.variables`
++ GC guard over TaskBrain/TurnRecorder/TurnDynamicData/DynamicDataFetcher/HttpExecutor/EngineStateSaver;
+failed refresh keeps the earlier context). Extended: test_call_context, test_prompt, test_voice_inputs,
+test_prefetch_dynamic_data, test_pathway_runtime, test_call_end.
+
+### Gates P08-T03b (real output, final tree; 2026-11-06T00:35Z)
+
+- `make fmt` clean; `make lint` exit 0; `make typecheck` exit 0 (mypy: 1633 source files); `make placeholders`
+  0 findings; `check_spec_refs` 0 problems; `check_openapi_drift` current; jscpd 0 clones; radon average
+  2.94 (`PathwayEngine._converse` B 10 as on HEAD, `_pass` A 4, `_decide` A 4); pip-audit (CI export) no known
+  vulnerabilities; `pnpm audit --audit-level high` exit 0 (1 moderate, below the level).
+- `make test` (final tree, run after the last source change): **13249 passed, 7 skipped**, coverage 99.08 %
+  (new modules `va_engine/turn_data.py`, `va_tools/turn_data.py`, `va_media/call_dynamic_data.py`,
+  `va_workflows/activities/dynamic_data.py` 100 %). An earlier full run on the tree before the 3-line
+  `TaskBrain._refresh` early return gave the same numbers.
+- `make e2e`: **first run 1 failed / 19 passed** — `test_concurrent_calls_on_one_media_worker`,
+  `assert 10.0 == 0` platform underruns (overhead p50/p95 107/150 ms PASS, lag p99 <= 25 ms). The media log
+  attributes all 10 to ONE event-loop stall at 23:36:53 while the 50 openers played (`turn=0`,
+  `wake_late_ms` 94-109, `prev_send_await_ms` ~0, no `gc_pause` at that instant); the run started ~8 min
+  after `make test` and right after the image rebuild (15-min load 4.5). Three reruns of the capacity flow
+  on that stack (`pytest tests_e2e -m capacity`): 3 x passed. Looking for a contribution of this task I
+  found that `TaskBrain._refresh` built a template scope (`call_builtins`) at every user turn even without a
+  port; it now returns at once without one (it runs at user turns, not at the opener where the stall was, so
+  it does not explain the stall, but it was avoidable work in the hot path). **Second full `make e2e` on the
+  final tree (cold, rebuilt stack, quiet host): 20 passed, 107 deselected, 418.72 s, exit 0** (capacity flow
+  passed). For the Reviewer: the first failure is reported as seen; if the capacity flow fails again on a
+  quiet host, read `outbound.underrun` / `gc_pause` in the media log before blaming this diff (no code of
+  this task runs for a call without `every_turn` entries beyond `turn_specs()` at brain build and one
+  `is None` check per user turn).
+
+## Review P08-T03b (Reviewer, 2026-11-06T00:10Z-00:35Z) — REJECTED, 2 findings
+
+Gates re-run on the tree as handed over: `make lint` exit 0, `make typecheck` exit 0, `make placeholders`
+exit 0, `check_spec_refs` exit 0, `make test` **13249 passed, 7 skipped**, coverage 99.08 %, exit 0
+(`logs/make_test_review_t03b.log`). Not re-run because the task goes back anyway: `make e2e`, jscpd, radon,
+audits (re-run them on the next pass).
+
+The gates are green; the rejection is about behaviour. A maintainer note about THIS task landed in the inbox
+at 23:50Z, while the build was running, and is not in `DONE`: `.ralph/review-inbox/2026-11-05-p08-t03b-wip-review.md`
+(one blocker, one non-blocking item). The Builder never saw it (nothing in the build notes). I reproduced
+both on the final tree with `logs/probe_review_t03b_test.py` (git-ignored; run
+`uv run pytest logs/probe_review_t03b_test.py -n 0 --no-cov -p no:cacheprovider -rA`): 3 failed.
+Read the note first; it has the full reasoning. Do not edit or delete it.
+
+1. **BLOCKER — a pathway turn cut after its refresh finished keeps the new lines and the events but drops
+   the variables** (specs/13 §7 Decision P08-T03b items 3 and 5).
+   - `packages/va_tools/src/va_tools/turn_data.py:79-90`: `TurnDynamicData.refresh` replaces `_lines` and
+     reports the events itself, before it returns.
+   - `packages/va_engine/src/va_engine/engine.py:458-479`: `_decide` runs the refresh as a TaskGroup child
+     beside the decision; the variables are merged only at `engine.py:445`, after `_decide` returned.
+   - A reply cancelled (superseded turn, barge-in merge) while the decision call is still running and the
+     refresh already completed raises out of `_decide`: `refreshed.result()` is never read, nothing merges.
+     Same when `_decide` fails for any other reason after the refresh completed.
+   - Probe output (real `TurnDynamicData` + real `PathwayEngine`, respx answer at once, `select_path`
+     gated, turn cancelled): `{'variables': {'plan': 'gold'}, 'lines': ('Their plan is platinum.',),
+     'events': [('ok', ['plan'])]}`. The event log says `plan` was set, the prompt's `## Context` says
+     platinum, `state.variables` (prompt variables block, `{{plan}}` in node text, the snapshot,
+     `calls.variables`) says gold, until a later refresh succeeds. This is the common cut: a cache hit or a
+     fast endpoint finishes in ms, the decision takes hundreds.
+   - The existing test `test_a_turn_cut_during_the_refresh_merges_nothing_and_the_next_turn_refreshes`
+     (`packages/va_engine/tests/test_engine_turn_data.py:201`) only cuts while the fake refresh is held, so
+     it cannot see this. TaskBrain is not affected (`task_runner.py:259-260`: no await between the refresh
+     returning and the merge).
+   - Required fix (the note's preferred one): lines, events and variables are ONE commit.
+     `TurnData.refresh` changes nothing and returns a pending result (the variables plus an `apply()` that
+     replaces the lines and reports the events); the callers apply it in the same synchronous step as
+     `merge_refreshed` (`engine.py:445`, `TaskBrain._refresh`). A cut then leaves no trace at all, which is
+     what item 5 says. Update the `TurnData` protocol docstrings, `FakeTurnData`, `refresh_turn`, the module
+     docstrings and the AGENTS.md bullet accordingly; item 5 may stay as written. (The note's smaller
+     alternative, merging a completed refresh task before re-raising and rewording item 5 to "cut while its
+     refresh runs", is acceptable only if the preferred shape turns out not to work; say why.)
+   - Required tests: (a) engine: the refresh finishes at once, the decision is gated
+     (`KeyedPort(gates={"select_path": gate})`), cancel the turn → variables, `sections()` and reported
+     events all unchanged, and the next turn refreshes and merges; (b) the same invariant when the decision
+     task fails instead of being cancelled, if a failing decide is reachable with the test ports (else say
+     so); (c) va_tools: `refresh` alone changes no line and reports nothing until `apply()`; `apply()`
+     replaces lines and reports in `dynamic_data` order; a reporter that raises still costs nothing;
+     (d) TaskBrain: lines/events/variables change together. Adapt the existing tests that read
+     `data.sections()` right after `refresh`.
+
+2. **A 2xx answer with nothing usable erases the entry's context lines** (note item 2, non-blocking there;
+   since the task is open anyway, settle it now).
+   - `turn_data.py:86-87` replaces an entry's lines for every result that is not `failed`; `ok` is any 2xx,
+     including a non-JSON body, an empty body and a body cut at the size cap
+     (`packages/va_tools/src/va_tools/http.py:203-210` extracts `None` for every name). Probe: a 200 HTML
+     page and a 200 empty body both give outcome `ok`, variables `{}`, `sections() == ()`, while the
+     variable keeps its value. A proxy's 200 error page removes context a 500 would have kept.
+   - Decide and write it into item 3 of the Decision: either (preferred, the note's rule) an `ok` result
+     whose body was not parsed as JSON or was truncated leaves that entry's lines alone, like a failed
+     fetch (the result needs to carry that fact: the live path knows `outcome.truncated` and whether `body`
+     is JSON, the cache path whether the cached body is a string), or keep the current behaviour and state
+     in item 3, with the reason, that a 2xx without usable JSON clears the entry's lines. Either way add a
+     `packages/va_tools/tests/test_turn_data.py` case for a 200 non-JSON body and (if the rule changes) a
+     truncated one. A JSON answer that simply no longer has the variable must keep losing its line
+     (existing test `test_a_variable_the_answer_no_longer_has_loses_its_line`). Pre-call is unaffected.
+
+Nothing else found (checked against specs/13 §7, specs/01 §2.1, specs/10 §5, specs/19 `call.dynamic_data`):
+the `fetch_all`/`within` cancellation path, the TaskBrain path, the speculation handling (`changed` covers
+variable and line), `CallContext.turn_sections` JSON round trip, saver + `_keeps_engine_state` pairing, the
+guarded HTTP client / `allow_http` wiring of `TurnDataSource`, the recorder's publishing, the pre-call
+amendment (every entry fetched, `every_turn` lines only in `turn_sections`), the GC guard in the runtime
+sim test, the test quality of the new files (real assertions, ManualClock/events, no sleeps).
+
+After the fix: re-run every gate including `make e2e` (the media runtime path changes again). On approval
+the Reviewer appends `2026-11-05-p08-t03b-wip-review.md` to `.ralph/review-inbox/DONE`.
+
+## Build P08-T03b, second pass (Builder, 2026-11-06T00:40Z-): the 2 review findings
+
+Read the inbox note `2026-11-05-p08-t03b-wip-review.md` and the Review section first; both findings fixed
+with the note's preferred shape. The note is untouched and NOT in `DONE` (Reviewer appends it on approval).
+
+1. **Blocker (lines + events + variables are one commit).**
+   - `va_engine.turn_data`: `TurnData.refresh(scope) -> TurnRefresh` (protocol: `variables`, `apply()`); a
+     refresh changes nothing. `refresh_turn` returns `TurnRefresh | None`; new `commit_refresh(variables,
+     refresh)` = `apply()` (lines + events) then `merge_refreshed`, one synchronous step; an `apply()` that
+     raises is logged `engine.turn_data_failed` and merges nothing.
+   - `va_tools.turn_data.TurnDynamicData.refresh` only fetches and returns a `FetchedTurn(variables, results,
+     owner)`; `FetchedTurn.apply()` → `TurnDynamicData.commit(results)` replaces the lines and reports.
+   - `PathwayEngine._decide` returns the pending refresh; `_pass` commits it right after `_decide` returned
+     (no await in between), so a turn cancelled, or whose decision raised, after the refresh finished keeps
+     nothing. `TaskBrain._refresh` commits right after its await.
+   - Tests: engine `test_a_turn_cut_after_its_refresh_finished_keeps_nothing_of_it` (decision gated,
+     `FakeTurnData.fetched` event, cancel → variables/lines/`applied` unchanged, next turn commits all three),
+     `test_a_turn_whose_decision_fails_after_the_refresh_finished_keeps_nothing_of_it` (a failing decide IS
+     reachable: `KeyedPort.script("select_path", RuntimeError)` leaves `_decide` as an ExceptionGroup);
+     `test_turn_data.py` (engine): nothing changes until committed, a commit without a value change still
+     applies the lines, an `apply()` that raises; TaskBrain tests assert `port.applied` beside the variables;
+     va_tools: `test_a_refresh_changes_no_line_and_reports_nothing_until_it_is_applied`,
+     `test_a_refresh_that_is_never_applied_leaves_no_trace_and_the_next_one_counts`, and the reviewer's probe
+     as a committed test (real `TurnDynamicData` in a real `PathwayEngine`):
+     `test_a_pathway_turn_cut_after_its_refresh_finished_keeps_lines_events_and_variables_old`; media
+     `test_call_dynamic_data` asserts no event before the commit. `FakeTurnData` follows the new contract
+     (`Fetched.apply`, `applied`, `fetched`).
+   - Proof the tests guard it: with `refresh` committing itself again (old behaviour, temp edit, restored)
+     9 tests failed (8 in va_tools `test_turn_data.py`, 1 in media `test_call_dynamic_data.py`).
+   - The reviewer's probe `logs/probe_review_t03b_test.py` is written against the old API (it awaits an event
+     reported during the refresh, and reads `refresh()`'s return as the variables); its three cases are the
+     committed tests above.
+2. **A 2xx without a usable answer keeps the entry's lines (the note's rule).** `DynamicDataResult.readable`
+   = the answer was a whole JSON document (`_json_document(body, truncated=)`: not truncated, not text / a
+   bare JSON string, not empty / `null`); fetched and cached answers alike. Only a readable answer has
+   variables: a body cut at the size cap sets nothing even when the cut text parses (new, tiny amendment of
+   P08-T03a rule 4, so "not readable ⇒ no variables, no lines" holds without exception; pre-call behaviour
+   is otherwise unchanged, since a non-JSON body already extracted nothing). `TurnDynamicData` counts only
+   readable results (variables and lines); an unreadable 2xx is still reported `ok` with `variables_set: []`.
+   A JSON answer that no longer has the variable still loses its line (existing test kept). Tests:
+   `test_turn_data.py` html / empty / JSON string / JSON null keep the lines, truncated keeps the lines and
+   sets nothing; `test_dynamic_data.py` `readable` for no-JSON answers, whole documents (`{}`, `[]`, `0`,
+   `false`), failures, the cut answer, and the cached text answer.
+
+Specs: 13 §7 Decision P08-T03a rule 4 (readable answer, amended 2026-11-06), Decision P08-T03b item 3 (the
+unreadable 2xx), item 5 rewritten (one commit; cut or failed decision before it leaves no trace; the `dyn:`
+cache entry stays), Code paragraph. AGENTS.md bullet updated.
+
+### Gates P08-T03b, second pass (real output, final tree; 2026-11-06T00:40Z-01:27Z)
+
+- `make fmt` clean; `make lint` exit 0; `make typecheck` exit 0 (mypy: 1633 source files); `make placeholders`
+  0 findings; `check_spec_refs` 0 problems; `check_openapi_drift` current; jscpd 0 clones (one clone between
+  two new tests was found and removed: `_gold_refreshed`); radon average 2.94 (`DynamicDataFetcher._fetch`
+  C 12 as on HEAD, `_pass` A 4, `_decide` A 4, `commit_refresh` A 3); pip-audit (CI export) no known
+  vulnerabilities; `pnpm audit --audit-level high` exit 0 (1 moderate).
+- `make test` (final tree, started after the last source change): **13272 passed, 7 skipped**, coverage
+  99.08 %, exit 0 (`logs/make_test_t03b2.log`; `va_engine/turn_data.py`, `va_tools/turn_data.py`,
+  `va_media/call_dynamic_data.py` 100 %). A first run was stopped by me (jscpd clone + `_fetch` at C 13
+  found meanwhile, fixed, restarted): its `exit=2` in an earlier copy of the log was my kill, not a failure.
+- `make e2e`, three full runs, reported as they happened:
+  1. right after `make test`, apps rebuilt (`logs/make_e2e_t03b2.log`): **1 failed / 19 passed** —
+     `test_concurrent_calls_on_one_media_worker`, `assert 1.0 == 0` platform underruns (overhead p50/p95
+     127/185 ms PASS). Media log: ONE `outbound.underrun` at 01:00:40.97, `turn=0` (opener), `wake_late_ms`
+     60.1, `prev_send_await_ms` 0.0, `queued_frames` 193, no `gc_pause` at that instant (nearest 01:00:40.02,
+     18.7 ms) = one event-loop stall while the 50 openers played, the signature of the previous pass's first
+     run. The capacity calls have no `dynamic_data`: the per-turn code does not run for them (one `is None`
+     check per user turn; nothing at the opener). Three reruns of the capacity flow on that stack
+     (`pytest tests_e2e -m capacity`): 3 x passed, 0 underruns, p50 126/108/109 ms.
+  2. `make down && make e2e` (cold stack; `logs/make_e2e_t03b2_run2.log`): **1 failed / 19 passed** —
+     `test_amd_ivr_mode` (the FIRST flow), `WaitTimeoutError: timed out after 30.0 s waiting for a sim call`.
+     Worker log: from 01:10:23 (`worker.polling`) to ~01:10:51 Temporal answered every poll `Unavailable:
+     "Not enough hosts to serve the request"`; the call's prefetch ran at 01:11:01.9 and it was dialed at
+     01:11:02.07, after the test's 30 s wait. Temporal was not serving yet when the first flow started (the
+     `temporal` container is `healthy` before its matching ring formed). The capacity flow PASSED in this run.
+  3. plain `make e2e` on that stack, host quiet (`logs/make_e2e_t03b2_run3.log`): **20 passed, 107
+     deselected, 420.18 s, exit 0**.
+  For the Reviewer: neither failure touches code of this task (run 1: no dynamic data in those calls, stall
+  at the opener; run 2: Temporal readiness before any call ran), but both are real gate failures on this
+  runner and are recorded in task `fix:e2e-cold-start-flakes`. If the capacity flow fails again, read
+  `outbound.underrun`/`gc_pause` in the media log first.
+
+## Review P08-T03b, second pass (Reviewer, 2026-11-06T01:27Z-01:45Z) — REJECTED, 3 findings
+
+Gates re-run on the tree as handed over: `make lint` exit 0, `make typecheck` exit 0, `make placeholders`
+0 findings, `check_spec_refs` exit 0, `make test` **13272 passed, 7 skipped**, coverage 99.08 %, exit 0
+(`logs/make_test_review_t03b2.log`). Not re-run because the task goes back anyway: `make e2e`, jscpd, radon,
+audits (re-run all of them on the next pass).
+
+Both findings of the first review are fixed and well tested: lines, events and variables are one synchronous
+commit on both runners (`commit_refresh` after `_decide` returned / right after the await in
+`TaskBrain._refresh`), the cut-after-refresh and failed-decision tests are real, `readable` keeps the lines
+of an unreadable 2xx. Nothing to change there.
+
+The rejection comes from THREE maintainer notes that landed in the inbox during the second build and are not
+in `DONE` (the Builder saw only the first note): `.ralph/review-inbox/2026-11-06-p08-t03b-recheck.md`
+(00:19Z), `2026-11-06-p08-t03b-third-pass.md` (00:51Z), `2026-11-06-p08-t03b-fourth-pass.md` (01:22Z, read
+this one first: it restates what is still open; item 1 is "fix before merge"). Read them; do not edit or
+delete them. I reproduced findings 1 and 3 on this tree with `logs/probe_review_t03b3_test.py`
+(git-ignored): `uv run pytest logs/probe_review_t03b3_test.py -n 0 --no-cov -p no:cacheprovider -rA`
+→ 2 failed.
+
+1. **Must fix (fourth-pass item 1): an unreadable 2xx answer is cached, so one bad answer pins the stale
+   state for the whole TTL.**
+   - `packages/va_tools/src/va_tools/dynamic_data.py:342-343`: `if redis is not None and not outcome.truncated`
+     stores every 2xx that was not cut, readable or not (a proxy's 200 HTML page, an empty 200/204, a bare
+     JSON string). The hit path (:324-327) then serves it as `ok`, `cached`, not readable.
+   - Probe (real `TurnDynamicData`, `cache: true`, endpoint answers 200 text once, then 200 JSON
+     `{"plan":"platinum"}`): `route.call_count == 1` after three refreshes; results
+     `('ok', False, False)`, `('ok', True, False)`, `('ok', True, False)`; the plan stays gold. The endpoint
+     recovered at the second turn and is not asked again for `cache_ttl_seconds` (default 300, up to
+     86 400), by any call of the org with the same rendered URL and body; every new call's pre-call fetch in
+     that window sets no variable. Silent: the events read `ok`, `cached`, level `info`.
+   - It contradicts what this diff itself decides (specs/13 §7 Decision P08-T03b item 3: such an answer
+     "says nothing about the data" and must not do more harm than a 500; a 500 is never cached, rule 3).
+     `test_a_cached_text_answer_is_as_unreadable_as_the_fetched_one`
+     (`packages/va_tools/tests/test_dynamic_data.py:233`) pins the wrong behaviour.
+   - Required: store only readable answers (`if redis is not None and readable:`; readable implies not
+     truncated). On the hit path a stored answer that is not a JSON document is a MISS (fall through to the
+     request, then overwrite/skip per the new rule), so entries written by a7f35b8 do not linger. Turn the
+     test at :233 around (a text answer is not cached: the second fetch sends a request and, when the
+     endpoint now answers JSON, sets the variables) and add: an empty 200/204 and a bare JSON string are not
+     cached; a stored non-document value left by the old build is a miss (seed it with `redis.set`).
+     Add a `test_turn_data.py` case of the probe (bad answer once, recovery at the next refresh with
+     `cache=True`). Spec: Decision P08-T03a rules 2 and 3 ("only readable answers are stored; a stored value
+     that is not a JSON document is a miss"). Mind the wording: rule 2 already uses "readable/unreadable
+     value" for "the stored value parses as `{status, body}`"; keep the two meanings apart. Module
+     docstring of `dynamic_data.py` (rule 3 text) too.
+
+2. **Settle now (recheck item 3, repeated in the third and fourth pass): `turn_sections` is not additive
+   for a reader one build behind.**
+   - `packages/va_domain/src/va_domain/call_context.py:42,90`: `CallContext` is `extra="forbid"`;
+     `CallContextStore.save` (`packages/va_db/src/va_db/call_context.py:69`) dumps every field, so EVERY
+     context a new worker writes carries `"turn_sections": {}`. A media worker one build behind fails
+     validation, `load` returns `None` and `DbCallContextLoader` rebuilds the context from the `calls` row:
+     no pre-call variables, no context lines, no `opener_text`, only a `call_context.invalid` warning. A
+     rolling update does not swap worker and media worker at the same instant, so Decision item 1's "the
+     field is additive ... deployed together" (specs/13:629-630) does not hold as written.
+   - Required: `extra="ignore"` on the top-level `CallContext` only (nested models and `SendCallConfig`
+     keep `forbid`), a test that a context JSON with an unknown top-level key loads (the existing
+     parametrized rejection case `extra-key` in `packages/va_domain/tests/test_call_context.py:116` changes
+     accordingly; an unknown key inside a nested model must still be refused), and item 1 reworded to what
+     holds (unknown top-level keys are ignored from this build on, so later fields are additive for readers
+     of this build or newer; nothing older is deployed). If you find a reason `ignore` is wrong, say so in
+     the spec and reword item 1 honestly instead; "additive" may not stay.
+
+3. **Settle now (recheck item 4): two `every_turn` entries that set one name flip to the earlier entry's
+   value when the later one does not count.**
+   - `packages/va_tools/src/va_tools/turn_data.py:99-102` builds the turn's variables only from this turn's
+     readable fetches. Probe: A (index 0) and B (index 1) both set `plan`; turn 1 → `{'plan': 'from-b'}`;
+     turn 2 (B answers 500, A ok) → `{'plan': 'from-a'}` while the lines stay `('Their plan is from-a.',
+     'Their plan is from-b.')`. Item 3 says a failed fetch "changes nothing: the earlier value and lines
+     stay"; here B's failure changes the value, and it flips back when B answers again.
+   - Required, one of: (preferred) keep per entry the names its last counted fetch set (updated in
+     `commit`, never in `refresh`: a refresh still changes nothing) and leave out of `FetchedTurn.variables`
+     any name that a LATER entry which did not count this turn set at its last success; or state in item 3
+     that a shared name follows the latest entry that counted in the turn. Either way a
+     `test_turn_data.py` case for the shared name (B fails, B unreadable 2xx, B times out is enough as one
+     parametrized or three short cases) and the rule in item 3. With the fix, mind the first turn of an
+     inbound/rebuilt call (no last success: nothing to protect) and that `initial` lines say nothing about
+     names (only fetches applied in this call count).
+
+Decided, NOT part of this task (do not build them here):
+- Fourth-pass item 2 + third-pass items 4 and 5 (no backoff for a hung per-turn endpoint; uvloop
+  `getaddrinfo` pool of 4 threads; large answers parsed on the media loop): own FIX task, runtime task
+  `fix:turn-data-backoff` (task-1793928628-1935). It changes Decision item 2 and adds an event outcome,
+  which deserves its own plan. Planner: insert it as a P08-FIX task at the top of the checklist.
+- Fourth-pass item 5 (recorder/brain cycle of pathway calls, predates T03b): already tracked as runtime
+  task `fix:pathway-call-cycles` (task-1793902623-4ed4); T03b adds the edge `TurnDynamicData._events` →
+  recorder to the same loop, the task-call GC guard in `test_runtime_dynamic_data_sim.py` passes. (I created
+  and closed a duplicate, task-1793928628-46bb.) Planner: insert it as a P08-FIX task.
+
+Checked myself and clean: `_decide`/`_pass` (no await between `apply()` and the merge; `changed` covers a
+variable and a line; a failed decision cancels the refresh in the TaskGroup), `TaskBrain._refresh` (early
+return without a port, `on_state` only on a change), `PreCallDynamicData.fetch` (every entry, `pre_call`
+lines vs `turn_sections`), `_keeps_engine_state` vs the runtime's saver, `TurnDataSource` (guarded shared
+client, `allow_http` local/test only, unsigned, `X-VA-Call-Id`), `TurnRecorder.dynamic_data` (level
+passed), prompt assembly in task and pathway calls, the test doubles and the new tests (events/ManualClock,
+no sleeps, real assertions), AGENTS.md bullet, specs/01 + specs/10 addenda.
+
+After the fix: every gate again including `make e2e` (run it on a quiet host, not right after `make test`;
+see `fix:e2e-cold-start-flakes`). On approval the Reviewer appends to `.ralph/review-inbox/DONE`:
+`2026-11-05-p08-t03b-wip-review.md`, `2026-11-06-p08-t03b-recheck.md`, `2026-11-06-p08-t03b-third-pass.md`,
+`2026-11-06-p08-t03b-fourth-pass.md` — the last two only once the two deferred items above are P08-FIX
+tasks in `plan/phase-08.md` (else leave them for the Planner).
+
+## Build P08-T03b, third pass (Builder, 2026-11-06T01:42Z-): the 3 review findings
+
+Read first: the three 2026-11-06 inbox notes (recheck, third-pass, fourth-pass); nothing newer about this
+task was in `.ralph/review-inbox` at 01:42Z. The two deferred items (`fix:turn-data-backoff`,
+`fix:pathway-call-cycles`) are NOT built here, as the Reviewer decided.
+
+1. **Only readable answers are cached; a stored non-document is a miss.**
+   `va_tools/dynamic_data.py`: `if redis is not None and readable:` (readable implies not truncated);
+   `_cached_answer` returns `None` when the stored body is not a JSON document
+   (`_json_document(body, truncated=False)`), so the hit path is always readable and an entry written by
+   a7f35b8 (text / bare string / `null` body) falls through to the request (logged
+   `tools.dynamic_data_cache_invalid`); a readable answer then overwrites it, an unreadable one leaves it
+   to age out and it stays a miss. Module docstring rules 2 and 3 reworded.
+   Tests (`packages/va_tools/tests/test_dynamic_data.py`): the old
+   `test_a_cached_text_answer_is_as_unreadable_as_the_fetched_one` is gone;
+   `test_a_2xx_answer_that_is_no_json_document_is_not_cached[html|empty|json-string|json-null]` (no `dyn:`
+   key after the bad answer, the second fetch sends a request and sets the variables, the third is a hit),
+   `test_a_no_content_answer_is_not_cached` (204),
+   `test_a_stored_value_that_is_no_usable_answer_is_a_miss[...,text-body,null-body]` (seeded with
+   `redis.set`; the request goes out and its readable answer replaces the entry),
+   `test_a_stored_answer_that_is_no_json_document_stays_a_miss_while_the_endpoint_is_unreadable`;
+   `test_turn_data.py::test_one_unreadable_answer_does_not_pin_a_cached_entry` (the probe: bad answer once,
+   recovery at the next refresh with `cache=True`, then a hit; 2 requests).
+2. **`CallContext` ignores unknown top-level keys.** `va_domain/call_context.py`: `_TOLERANT =
+   ConfigDict(frozen=True, extra="ignore")` on `CallContext` only; nested models keep `_FROZEN` (`forbid`),
+   `SendCallConfig` untouched. Tests (`packages/va_domain/tests/test_call_context.py`):
+   `test_a_top_level_key_a_newer_writer_added_is_ignored` (a dumped context plus an unknown key loads equal
+   to the original, variables and lines kept); the rejection parametrization lost `extra-key` and gained
+   `config-extra-key`, `memory-extra-key`, `fact-extra-key` (nested models still refuse). I found no reason
+   `ignore` is wrong: `version: Literal[1]` still refuses a change of meaning.
+3. **A shared name no longer flips.** `va_tools/turn_data.py`: `TurnDynamicData._names[index]` = the names
+   the entry's last counted fetch set, written ONLY in `commit` (a refresh still changes nothing).
+   `_turn_variables(results)` walks the results in `dynamic_data` order: a counting fetch sets its
+   variables, one that does not count pops the names it holds from what the EARLIER entries set this turn
+   (a later counting entry can still set the name). First turn / inbound / rebuilt context: nothing held,
+   so nothing protected (`initial` lines say nothing about names), stated in the spec. Tests
+   (`test_turn_data.py`): `test_a_later_entry_that_does_not_count_keeps_the_name_it_shares[failed|html|
+   empty]` (A's other variable still arrives, lines unchanged, B wins again when it answers),
+   `test_a_later_entry_that_times_out_keeps_the_name_it_shares` (ManualClock budget),
+   `test_an_entry_holds_only_the_names_its_last_applied_counted_fetch_set` (never counted → holds nothing;
+   fetched but never applied → holds nothing; counted without the name → releases it),
+   `test_an_earlier_entry_that_does_not_count_takes_nothing_from_a_later_one`.
+
+Proof the tests guard the fixes: with the three source changes reverted (temp copies in `/var/tmp/t03b3`,
+restored afterwards) 15 of the 111 tests in the three files failed (6 turn_data, 8 dynamic_data, 1
+call_context); restored: 111 passed.
+
+The reviewer's probe `logs/probe_review_t03b3_test.py`: the shared-name case passes. The cache case still
+"fails", on its own assertion `route.call_count == 3`: with the fix the count is 2, because the third
+refresh is a legitimate hit of the READABLE answer the second one stored (printed: `('ok', False, False)`,
+`('ok', False, True)`, `('ok', True, True)`, plan platinum from the second refresh on). Old tree: 1.
+
+Specs: 13 §7 Decision P08-T03a rule 2 (stored shape + body must be a JSON document, else a miss; the two
+meanings of "readable" kept apart: rule 2 no longer uses the word for the stored value) and rule 3 (only
+readable answers are stored, why); Decision P08-T03b item 1 ("additive" replaced by what holds:
+`extra="ignore"` at the top level from this build on), item 3 (unreadable 2xx is not cached; the
+shared-name rule incl. the first-turn limit), Code paragraph; specs/01 §2.1 note; AGENTS.md bullet.
+
+### Gates P08-T03b, third pass (real output, final tree; 2026-11-06T01:46Z-02:12Z)
+
+No source, spec or AGENTS.md file changed after `make lint` started (01:46Z); the inbox had no note newer
+than the fourth-pass one (01:22Z) when the gates finished.
+
+- `make fmt` clean; `make lint` exit 0; `make typecheck` exit 0 (`Success: no issues found in 1633 source
+  files`); `make placeholders` 0 findings; `check_spec_refs` 0 problems; `check_openapi_drift` current;
+  jscpd `Found 0 exact clones` (1915 files); radon average A (2.94), `DynamicDataFetcher._fetch` C 11 (was
+  12), `_unstorable` C 11 (unchanged), `_turn_variables` below C; pip-audit (CI export) `No known
+  vulnerabilities found`; `pnpm audit --audit-level high` exit 0 (1 moderate).
+- `make test` (started after the last source change): **13289 passed, 7 skipped in 873.86s**, coverage
+  99.08 %, exit 0 (`logs/make_test_t03b3.log`; `va_tools/turn_data.py` 100 %, `va_domain/call_context.py`
+  100 %, `va_tools/dynamic_data.py` 98 %: the three uncovered lines are the non-text Redis value in
+  `_cached_answer` and the unrenderable URL in `_timed_out`, both from a7f35b8).
+- `make e2e` (ONE run, on the running stack, apps rebuilt, started 30 s after `make test` ended, load
+  average 2.0): **20 passed, 107 deselected in 419.64s**, exit 0 (`logs/make_e2e_t03b3.log`), the 50-call
+  capacity flow included. Neither flake of the previous pass showed (`fix:e2e-cold-start-flakes` stays open).
+
+For the Reviewer: the three inbox notes of 2026-11-06 are answered by items 1-3 above; fourth-pass items 2
+and 5 and third-pass items 4 and 5 are the deferred tasks `fix:turn-data-backoff` and
+`fix:pathway-call-cycles` (the latter is not in `ralph tools task ready` output of this iteration: check it
+is still open before listing the notes in `DONE`).
+
+## Review P08-T03b, third pass of the build / fourth review (Reviewer, 2026-11-06T02:12Z-02:36Z) — APPROVED
+
+Gates re-run on the tree as handed over (no source change since 01:46Z; inbox had no note newer than the
+fourth-pass one at 02:34Z): `make lint` exit 0, `make typecheck` exit 0, `make placeholders` 0 findings,
+`check_spec_refs` 0 problems, `check_openapi_drift` current, jscpd 0 clones (1915 files), radon A (2.94),
+pip-audit (CI export) no known vulnerabilities, `pnpm audit --audit-level high` exit 0 (1 moderate, tracked);
+`make test` **13289 passed, 7 skipped in 818.95s**, coverage 99.08 %, exit 0
+(`logs/make_test_review_t03b3.log`; `turn_data.py` and `call_context.py` 100 %); `make e2e` (started ~30 s
+after `make test`, warm stack) **20 passed, 107 deselected in 418.72s**, exit 0
+(`logs/make_e2e_review_t03b3.log`), capacity flow included.
+
+The three findings of the previous review, checked in the code and by probes:
+1. Cache: `if redis is not None and readable`, `_cached_answer` refuses a stored body that is no JSON document
+   (miss, logged `tools.dynamic_data_cache_invalid`, overwritten by the next readable answer). My old probe
+   `logs/probe_review_t03b3_test.py` now reads call_count 2 with `(ok, False, False)`, `(ok, False, True)`,
+   `(ok, True, True)`: its `== 3` assertion was over-strict (the third refresh is a legitimate hit of the
+   readable answer), as the Builder said. New probe `logs/probe_review_t03b4_test.py`: an old
+   `{"status":204,"body":null}` entry is a miss and is replaced; a stored scalar document is a hit.
+2. `CallContext` top level `extra="ignore"`, nested models and `SendCallConfig` still `forbid` (tests for
+   config/memory/fact extra keys); spec item 1 reworded honestly.
+3. Shared name: `_names` written only in `commit`; probe with three entries sharing `plan` over four turns
+   gives `[{'plan': 'c1'}, {}, {}, {'plan': 'c4'}]` (no flip to an earlier entry). The first-turn/inbound/
+   rebuilt-context limit is stated in spec item 3.
+Files changed since the previous review are exactly those three sources, their three test files, specs/13,
+specs/01 and AGENTS.md (mtimes); everything else was reviewed in the earlier passes.
+
+Inbox: `2026-11-05-p08-t03b-wip-review.md` and `2026-11-06-p08-t03b-recheck.md` appended to `DONE` (every
+item fixed). NOT in `DONE`, on purpose: `2026-11-06-p08-t03b-third-pass.md` and
+`2026-11-06-p08-t03b-fourth-pass.md`. Their items 1-3 (third) / 1, 3, 4 (fourth) are fixed by this commit;
+what is still open in them and must become P08-FIX tasks at the top of `plan/phase-08.md` (Planner):
+- third-pass items 4 + 5, fourth-pass item 2 + "unchanged, low confidence": no backoff for a hung per-turn
+  endpoint (uvloop `getaddrinfo` pool of 4 threads, `UV_THREADPOOL_SIZE`), per-turn answer size parsed on the
+  media loop → runtime task `fix:turn-data-backoff` (task-1793928628-1935). Changes Decision P08-T03b item 2
+  and adds an event outcome.
+- fourth-pass item 5: recorder/brain cycle of pathway calls (`recorder.tagger = brain`), confirm with
+  `unreachable_after()` in `test_runtime_pathway_sim.py` first → runtime task `fix:pathway-call-cycles`
+  (task-1793902623-4ed4).
+Once both are FIX tasks (or approved), list the two notes in `DONE`.

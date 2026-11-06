@@ -1,4 +1,4 @@
-"""Pre-call dynamic data in ``prefetch_call_context`` (specs/13 §7 Decision P08-T03a).
+"""Pre-call dynamic data in ``prefetch_call_context`` (specs/13 §7 Decisions P08-T03a and P08-T03b).
 
 The clock is the wall clock: ``call_events`` partitions exist only around the migration month, and the
 fetch budget waits on the clock.
@@ -223,21 +223,72 @@ async def test_when_every_fetch_fails_the_call_keeps_its_variables(
     assert (level, message) == ("warning", "Dynamic data failed: connection")
 
 
-async def test_every_turn_specs_are_not_fetched_before_the_call(
+async def test_an_every_turn_entry_gets_its_first_value_before_the_call(
     database: Database, redis: FakeAsyncRedis, http: httpx.AsyncClient, api: respx.MockRouter
 ) -> None:
-    contacts = api.get("/contacts").respond(200, json=CONTACT)
-    orders = api.get("/orders").respond(200, json={"last": "A-7"})
+    route = api.get("/contacts").respond(200, json=CONTACT)
     per_turn = {**FETCH, "timing": "every_turn"}
-    pre_call = {"url": f"{API}/orders", "response_data": [{"name": "order", "data": "$.last"}]}
-    call = await seed_call(database, status="queued", config=_config(per_turn, pre_call))
+    call = await seed_call(database, status="queued", config=_config(per_turn))
+
+    async with phrase_cache() as (_sim, cache):
+        activities = _activities(database, redis, http, prerender=opener_prerender(cache))
+        result = await run_prefetch(activities, call)
+
+    assert (result.stored, result.dynamic_data, route.call_count) == (True, 1, 1)
+    stored = await _stored(redis, call)
+    assert stored.variables == {"customer_name": "Ana", "plan": "Pro"}
+    assert stored.context_sections == []
+    assert stored.turn_sections == {0: ["The customer is Ana.", "Their plan is Pro."]}
+    assert stored.opener_text == "Hi Ana, this is Maya."
+    assert (await load_call(database, call)).variables == {"customer_name": "Ana", "plan": "Pro"}
+    [(event_type, level, _, data)] = await _events(database, call)
+    assert (event_type, level, data["timing"], data["index"]) == (
+        "call.dynamic_data",
+        "info",
+        "every_turn",
+        0,
+    )
+
+
+async def test_mixed_entries_keep_their_lines_apart(
+    database: Database, redis: FakeAsyncRedis, http: httpx.AsyncClient, api: respx.MockRouter
+) -> None:
+    api.get("/contacts").respond(200, json=CONTACT)
+    api.get("/balance").respond(200, json={"plan": "Trial", "balance": 12})
+    api.get("/orders").respond(500, json={})
+    api.get("/seats").respond(200, json={"seats": 4})
+    balance = {
+        "url": f"{API}/balance",
+        "timing": "every_turn",
+        "response_data": [
+            {"name": "plan", "data": "$.plan", "context": "The billing plan is {{plan}}."},
+            {"name": "balance", "data": "$.balance", "context": "They owe {{balance}}."},
+        ],
+    }
+    orders = {**balance, "url": f"{API}/orders"}
+    seats = {
+        "url": f"{API}/seats",
+        "timing": "every_turn",
+        "response_data": [{"name": "seats", "data": "$.seats"}],
+    }
+    call = await seed_call(database, status="queued", config=_config(FETCH, balance, orders, seats))
 
     result = await run_prefetch(_activities(database, redis, http), call)
 
-    assert (contacts.call_count, orders.call_count, result.dynamic_data) == (0, 1, 1)
-    assert (await _stored(redis, call)).variables == {"order": "A-7"}
-    [(*_, data)] = await _events(database, call)
-    assert (data["index"], data["timing"]) == (1, "pre_call")
+    assert (result.stored, result.dynamic_data) == (True, 4)
+    stored = await _stored(redis, call)
+    # The later entry wins the variable; each timing keeps its own line of it.
+    assert stored.variables == {"customer_name": "Ana", "plan": "Trial", "balance": 12, "seats": 4}
+    assert stored.context_sections == ["The customer is Ana.", "Their plan is Pro."]
+    assert stored.turn_sections == {1: ["The billing plan is Trial.", "They owe 12."]}
+    assert stored.turn_lines() == ["The billing plan is Trial.", "They owe 12."]
+    events = await _events(database, call)
+    assert [(data["index"], data["timing"], data["outcome"]) for *_, data in events] == [
+        (0, "pre_call", "ok"),
+        (1, "every_turn", "ok"),
+        (2, "every_turn", "http_error"),
+        (3, "every_turn", "ok"),
+    ]
 
 
 async def test_no_dynamic_data_changes_nothing(

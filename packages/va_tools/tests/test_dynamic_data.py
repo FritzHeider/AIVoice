@@ -17,7 +17,7 @@ from clock_helpers import ManualClock, RecordingClock
 from fakeredis import FakeAsyncRedis, FakeServer
 from redis_ttl import assert_expires_in
 from service_helpers import json_log_stream, log_events
-from tools_helpers import API, plain_executor
+from tools_helpers import API, ORG, HeldAnswer, manual_fetcher, plain_executor
 
 from va_domain.calls.tools import DynamicDataSpec
 from va_engine.ports import HttpCall, HttpOutcome
@@ -32,9 +32,8 @@ from va_tools.dynamic_data import (
     cache_key,
     merge_results,
 )
-from va_tools.http import USER_AGENT, HttpExecutor
+from va_tools.http import USER_AGENT
 
-ORG = uuid.UUID("0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d71")
 OTHER_ORG = uuid.UUID("0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d72")
 BUDGET_S = 6.0
 SCOPE = TemplateScope(
@@ -159,13 +158,56 @@ async def test_of_two_items_with_one_name_the_later_counts(api: respx.MockRouter
     assert result.sections == {"who": "Second: Pro"}
 
 
-async def test_a_text_answer_is_ok_and_sets_nothing(api: respx.MockRouter) -> None:
-    api.get("/contacts").respond(200, text="not json")
+@pytest.mark.parametrize(
+    "content",
+    [b"not json", b"<html>Bad gateway</html>", b"", b'"gold"', b"null"],
+    ids=["text", "html", "empty", "json-string", "json-null"],
+)
+async def test_a_2xx_answer_that_is_no_json_document_is_ok_unreadable_and_sets_nothing(
+    api: respx.MockRouter, content: bytes
+) -> None:
+    api.get("/contacts").respond(200, content=content)
 
     result = await _fetch(_spec())
 
-    assert (result.outcome, result.variables, result.sections) == ("ok", {}, {})
-    assert result.message() == "Dynamic data: 0 variables set"
+    assert (result.outcome, result.readable, result.variables, result.sections) == ("ok", False, {}, {})
+    assert (result.level, result.message()) == ("info", "Dynamic data: 0 variables set")
+
+
+@pytest.mark.parametrize("content", [b"{}", b"[]", b"0", b"false"], ids=["object", "array", "zero", "false"])
+async def test_any_whole_json_document_is_readable(api: respx.MockRouter, content: bytes) -> None:
+    api.get("/contacts").respond(200, content=content, headers={"content-type": "application/json"})
+
+    result = await _fetch(_spec())
+
+    assert (result.outcome, result.readable, result.variables) == ("ok", True, {})
+
+
+async def test_a_failure_is_never_readable(api: respx.MockRouter) -> None:
+    api.get("/contacts").respond(500, json=CONTACT)
+
+    result = await _fetch(_spec())
+
+    assert (result.outcome, result.readable, result.variables) == ("http_error", False, {})
+
+
+async def test_an_answer_cut_at_the_size_cap_sets_nothing_even_when_it_parses() -> None:
+    class Cut:
+        async def execute(self, call: HttpCall) -> HttpOutcome:
+            del call
+            return HttpOutcome(
+                kind="ok",
+                status=200,
+                body={"contact": {"name": "An"}},
+                truncated=True,
+                extracted={"customer_name": "An", "plan": None},
+            )
+
+    fetcher = DynamicDataFetcher(Cut(), redis=None, org_id=ORG, clock=RecordingClock())
+
+    result = await fetcher.fetch(_spec(), 0, SCOPE, timeout_ms=5_000)
+
+    assert (result.outcome, result.readable, result.variables, result.sections) == ("ok", False, {}, {})
 
 
 # The cache.
@@ -185,6 +227,63 @@ async def test_a_cached_fetch_sends_no_request_and_reports_cached(
     assert (second.outcome, second.status_code) == ("ok", 200)
     assert (second.variables, second.sections) == (first.variables, first.sections)
     assert second.message() == "Dynamic data: 2 variables set (cached)"
+    assert (first.readable, second.readable) == (True, True)
+
+
+UNREADABLE = [b"<html>Bad gateway</html>", b"", b'"maintenance"', b"null"]
+UNREADABLE_IDS = ["html", "empty", "json-string", "json-null"]
+
+
+@pytest.mark.parametrize("content", UNREADABLE, ids=UNREADABLE_IDS)
+async def test_a_2xx_answer_that_is_no_json_document_is_not_cached(
+    api: respx.MockRouter, redis: FakeAsyncRedis, content: bytes
+) -> None:
+    """Such an answer says nothing about the data: like a 500, it must not keep the endpoint from being
+    asked again for the whole TTL."""
+    route = api.get("/contacts").mock(
+        side_effect=[httpx.Response(200, content=content), httpx.Response(200, json=CONTACT)]
+    )
+    spec = _spec(cache=True)
+
+    first = await _fetch(spec, redis=redis)
+    assert await redis.keys("dyn:*") == []
+    second = await _fetch(spec, redis=redis)
+    third = await _fetch(spec, redis=redis)
+
+    assert (first.outcome, first.readable, first.cached, first.variables) == ("ok", False, False, {})
+    assert (second.readable, second.cached, second.variables) == (
+        True,
+        False,
+        {"customer_name": "Ana", "plan": "Pro"},
+    )
+    assert (third.cached, third.variables, route.call_count) == (True, second.variables, 2)
+
+
+async def test_a_no_content_answer_is_not_cached(api: respx.MockRouter, redis: FakeAsyncRedis) -> None:
+    route = api.get("/contacts").respond(204)
+    spec = _spec(cache=True)
+
+    first = await _fetch(spec, redis=redis)
+    second = await _fetch(spec, redis=redis)
+
+    assert (first.outcome, first.status_code, second.cached, route.call_count) == ("ok", 204, False, 2)
+    assert await redis.keys("dyn:*") == []
+
+
+async def test_a_stored_answer_that_is_no_json_document_stays_a_miss_while_the_endpoint_is_unreadable(
+    api: respx.MockRouter, redis: FakeAsyncRedis
+) -> None:
+    route = api.get("/contacts").respond(200, text="still down")
+    key = cache_key(ORG, "GET", f"{API}/contacts?phone=%2B14155550123", None)
+    await redis.set(key, '{"status":200,"body":"not json"}', ex=300)
+
+    first = await _fetch(_spec(cache=True), redis=redis)
+    second = await _fetch(_spec(cache=True), redis=redis)
+
+    assert [(r.outcome, r.cached, r.readable, r.variables) for r in (first, second)] == [
+        ("ok", False, False, {})
+    ] * 2
+    assert route.call_count == 2
 
 
 async def test_the_cache_entry_expires_with_cache_ttl_seconds(
@@ -315,12 +414,16 @@ async def test_a_truncated_body_is_not_cached(redis: FakeAsyncRedis) -> None:
         '{"status": true, "body": 1}',
         '{"status": 200}',
         "[" * 100_000,
+        '{"status": 200, "body": "<html>Bad gateway</html>"}',
+        '{"status": 204, "body": null}',
     ],
-    ids=["text", "list", "text-status", "bool-status", "no-body", "too-deep"],
+    ids=["text", "list", "text-status", "bool-status", "no-body", "too-deep", "text-body", "null-body"],
 )
-async def test_an_unreadable_cache_value_is_a_miss(
+async def test_a_stored_value_that_is_no_usable_answer_is_a_miss(
     api: respx.MockRouter, redis: FakeAsyncRedis, stored: str
 ) -> None:
+    """Not the stored shape, or (as a build before 2026-11-06 could store) an answer that is no JSON
+    document: the endpoint is asked and its readable answer replaces the entry."""
     stream = json_log_stream()
     route = api.get("/contacts").respond(200, json=CONTACT)
     key = cache_key(ORG, "GET", f"{API}/contacts?phone=%2B14155550123", None)
@@ -328,7 +431,8 @@ async def test_an_unreadable_cache_value_is_a_miss(
 
     result = await _fetch(_spec(cache=True), redis=redis)
 
-    assert (result.outcome, result.cached, route.call_count) == ("ok", False, 1)
+    assert (result.outcome, result.cached, result.readable, route.call_count) == ("ok", False, True, 1)
+    assert result.variables == {"customer_name": "Ana", "plan": "Pro"}
     assert await _stored(redis, key) == {"status": 200, "body": CONTACT}
     assert "tools.dynamic_data_cache_invalid" in [line["event"] for line in log_events(stream)]
 
@@ -629,35 +733,12 @@ def test_merge_results_later_fetch_wins_names_and_lines() -> None:
 # Several fetches.
 
 
-class _Held:
-    """A respx side effect that answers once ``gate`` is set and records what arrived."""
-
-    def __init__(self, body: dict[str, Any]) -> None:
-        self.body = body
-        self.gate = asyncio.Event()
-        self.arrived = asyncio.Event()
-        self.cancelled = False
-
-    async def __call__(self, request: httpx.Request) -> httpx.Response:
-        del request
-        self.arrived.set()
-        try:
-            await self.gate.wait()
-        except asyncio.CancelledError:
-            self.cancelled = True
-            raise
-        return httpx.Response(200, json=self.body)
-
-
 @asynccontextmanager
 async def _fetching_all(
     specs: list[tuple[int, DynamicDataSpec]],
 ) -> AsyncIterator[tuple[ManualClock, asyncio.Task[list[DynamicDataResult]]]]:
     """``fetch_all`` of ``specs`` running over the real executor on a manual clock (budget ``BUDGET_S``)."""
-    clock = ManualClock()
-    async with httpx.AsyncClient() as client:
-        executor = HttpExecutor(client, clock=clock, allow_http=False, call_id="call-7")
-        fetcher = DynamicDataFetcher(executor, redis=None, org_id=ORG, clock=clock)
+    async with manual_fetcher() as (clock, fetcher):
         running = asyncio.create_task(fetcher.fetch_all(specs, SCOPE, timeout_ms=5_000, budget_s=BUDGET_S))
         try:
             yield clock, running
@@ -668,8 +749,8 @@ async def _fetching_all(
 
 
 async def test_fetch_all_runs_concurrently_in_one_scope_and_keeps_spec_order(api: respx.MockRouter) -> None:
-    contacts = _Held(CONTACT)
-    orders = _Held({"last": {"id": "A-7"}})
+    contacts = HeldAnswer(CONTACT)
+    orders = HeldAnswer({"last": {"id": "A-7"}})
     api.get("/contacts").mock(side_effect=contacts)
     orders_route = api.get("/orders").mock(side_effect=orders)
     specs = [
@@ -700,7 +781,7 @@ async def test_fetch_all_runs_concurrently_in_one_scope_and_keeps_spec_order(api
 
 async def test_fetch_all_reports_what_missed_the_budget_as_timeout(api: respx.MockRouter) -> None:
     stream = json_log_stream()
-    slow = _Held({"last": {"id": "A-7"}})
+    slow = HeldAnswer({"last": {"id": "A-7"}})
     api.get("/contacts").respond(200, json=CONTACT)
     api.get("/orders").mock(side_effect=slow)
     specs = [
