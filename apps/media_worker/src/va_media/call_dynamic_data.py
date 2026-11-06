@@ -1,11 +1,15 @@
-"""Per-turn dynamic data of calls in the media worker (specs/13 §7 Decision P08-T03b).
+"""Per-turn dynamic data of calls in the media worker (specs/13 §7 Decisions P08-T03b and P08-FIX-23).
 
 :class:`TurnDataSource` holds the per-process pieces (the guarded tool HTTP client shared with tools and
 Webhook nodes, the Redis client of the ``dyn:`` cache, which the worker's pre-call fetches fill too, and the
 clock) and builds the :class:`~va_tools.turn_data.TurnDynamicData` of a call that has ``timing:
 "every_turn"`` entries: the requests carry ``User-Agent`` and ``X-VA-Call-Id`` and are not signed (as the
 pre-call fetches), the lines start from the context's ``turn_sections``, and every fetch is reported to the
-call's recorder as ``call.dynamic_data``.
+call's recorder as ``call.dynamic_data``. A per-turn answer is read up to
+:data:`~va_tools.turn_data.TURN_MAX_ANSWER_BYTES` (a larger one is cut, so it sets nothing, keeps the
+entry's lines and is not cached) and a stored answer above that size is a miss: per-turn answers are parsed
+and searched on the loop that paces every call's audio, so they are bounded tighter than the worker's
+pre-call ones.
 """
 
 from __future__ import annotations
@@ -19,7 +23,7 @@ from va_common.time import Clock
 from va_domain.call_context import CallContext
 from va_tools.dynamic_data import DynamicDataFetcher
 from va_tools.http import HttpExecutor
-from va_tools.turn_data import DynamicDataEvents, TurnDynamicData, turn_specs
+from va_tools.turn_data import TURN_MAX_ANSWER_BYTES, DynamicDataEvents, TurnDynamicData, turn_specs
 
 __all__ = ["TurnDataSource"]
 
@@ -43,7 +47,17 @@ class TurnDataSource:
         if not specs:
             return None
         http = HttpExecutor(
-            self.tools_http, clock=self.clock, allow_http=self.allow_http, call_id=str(context.call_id)
+            self.tools_http,
+            clock=self.clock,
+            allow_http=self.allow_http,
+            call_id=str(context.call_id),
+            max_bytes=TURN_MAX_ANSWER_BYTES,
         )
-        fetcher = DynamicDataFetcher(http, redis=self.redis, org_id=context.org_id, clock=self.clock)
+        fetcher = DynamicDataFetcher(
+            http,
+            redis=self.redis,
+            org_id=context.org_id,
+            clock=self.clock,
+            max_cached_bytes=TURN_MAX_ANSWER_BYTES,
+        )
         return TurnDynamicData(fetcher, specs, initial=context.turn_sections, events=events)

@@ -8,7 +8,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 import pytest
@@ -81,16 +81,19 @@ async def _stored(redis: FakeAsyncRedis, key: str) -> Any:
     return json.loads(raw)
 
 
-async def _fetch(
+async def _fetch(  # noqa: PLR0913 - one keyword per fetcher knob keeps the tests explicit
     spec: DynamicDataSpec,
     *,
     redis: FakeAsyncRedis | None = None,
     org_id: uuid.UUID = ORG,
     index: int = 0,
     clock: RecordingClock | None = None,
+    max_cached_bytes: int = MAX_CACHED_BYTES,
 ) -> DynamicDataResult:
     async with plain_executor(clock=clock) as (executor, recording):
-        fetcher = DynamicDataFetcher(executor, redis=redis, org_id=org_id, clock=recording)
+        fetcher = DynamicDataFetcher(
+            executor, redis=redis, org_id=org_id, clock=recording, max_cached_bytes=max_cached_bytes
+        )
         return await fetcher.fetch(spec, index, SCOPE, timeout_ms=5_000)
 
 
@@ -384,6 +387,89 @@ async def test_an_oversized_body_is_not_cached(api: respx.MockRouter, redis: Fak
         2,
     )
     assert await redis.keys("dyn:*") == []
+
+
+def _padded(size: int) -> dict[str, Any]:
+    """The contact answer padded so that its compact JSON is exactly ``size`` bytes."""
+    body = {**CONTACT, "padding": ""}
+    room = size - len(json.dumps(body, separators=(",", ":")).encode())
+    assert room >= 0
+    return {**CONTACT, "padding": "x" * room}
+
+
+TURN_LIMIT = 65_536
+CONTACTS_KEY = cache_key(ORG, "GET", f"{API}/contacts?phone=%2B14155550123", None)
+
+
+async def test_a_body_of_exactly_the_fetcher_s_limit_is_stored_and_hit_by_it(
+    api: respx.MockRouter, redis: FakeAsyncRedis
+) -> None:
+    route = api.get("/contacts").respond(200, json=_padded(TURN_LIMIT))
+    spec = _spec(cache=True)
+
+    first = await _fetch(spec, redis=redis, max_cached_bytes=TURN_LIMIT)
+    second = await _fetch(spec, redis=redis, max_cached_bytes=TURN_LIMIT)
+
+    assert (first.cached, second.cached, route.call_count) == (False, True, 1)
+    assert second.variables == {"customer_name": "Ana", "plan": "Pro"}
+    assert await _stored(redis, CONTACTS_KEY) == {"status": 200, "body": _padded(TURN_LIMIT)}
+
+
+async def test_an_answer_above_the_fetcher_s_limit_is_not_stored(
+    api: respx.MockRouter, redis: FakeAsyncRedis
+) -> None:
+    """The limit is the fetcher's: the default one stores the same answer."""
+    route = api.get("/contacts").respond(200, json=_padded(TURN_LIMIT + 1))
+    spec = _spec(cache=True)
+
+    first = await _fetch(spec, redis=redis, max_cached_bytes=TURN_LIMIT)
+    stored_by_the_smaller_limit = await redis.keys("dyn:*")
+    second = await _fetch(spec, redis=redis, max_cached_bytes=TURN_LIMIT)
+    await _fetch(spec, redis=redis)
+
+    assert first.variables == second.variables == {"customer_name": "Ana", "plan": "Pro"}
+    assert (first.cached, second.cached, stored_by_the_smaller_limit) == (False, False, [])
+    assert route.call_count == 3
+    assert await redis.keys("dyn:*") == [CONTACTS_KEY.encode()]
+
+
+async def test_a_stored_answer_above_the_fetcher_s_limit_is_a_miss(
+    api: respx.MockRouter, redis: FakeAsyncRedis
+) -> None:
+    """What the worker's pre-call fetch stored (up to 262 144 bytes) is no hit for a fetcher that reads
+    less: it asks the endpoint, and a fetcher with the default limit still hits the stored answer."""
+    stream = json_log_stream()
+    route = api.get("/contacts").respond(200, json=CONTACT)
+    stored = {"status": 200, "body": _padded(70_000)}
+    await redis.set(CONTACTS_KEY, json.dumps(stored, separators=(",", ":")))
+    spec = _spec(cache=True)
+
+    by_default = await _fetch(spec, redis=redis)
+    sent_by_default = route.call_count
+    limited = await _fetch(spec, redis=redis, max_cached_bytes=TURN_LIMIT)
+
+    assert (by_default.cached, by_default.readable, sent_by_default) == (True, True, 0)
+    assert (limited.outcome, limited.cached, limited.readable, route.call_count) == ("ok", False, True, 1)
+    assert await _stored(redis, CONTACTS_KEY) == {"status": 200, "body": CONTACT}
+    events = [line["event"] for line in log_events(stream)]
+    assert events.count("tools.dynamic_data_cache_oversized") == 1
+    assert "tools.dynamic_data_cache_invalid" not in events
+
+
+async def test_the_stored_size_is_counted_in_bytes_for_a_client_that_returns_text(
+    api: respx.MockRouter, server: FakeServer
+) -> None:
+    """A ``decode_responses`` client hands the value back as ``str``: 40 000 two-byte characters are
+    80 000 bytes, above the limit, although they are fewer characters than it."""
+    route = api.get("/contacts").respond(200, json=CONTACT)
+    text_client = FakeAsyncRedis(server=server, decode_responses=True)
+    stored = {"status": 200, "body": {**CONTACT, "padding": "é" * 40_000}}
+    await text_client.set(CONTACTS_KEY, json.dumps(stored, separators=(",", ":"), ensure_ascii=False))
+
+    limited = await _fetch(_spec(cache=True), redis=text_client, max_cached_bytes=TURN_LIMIT)
+    await text_client.aclose()
+
+    assert (limited.cached, route.call_count) == (False, 1)
 
 
 async def test_a_truncated_body_is_not_cached(redis: FakeAsyncRedis) -> None:
@@ -817,6 +903,58 @@ async def test_fetch_all_reports_what_missed_the_budget_as_timeout(api: respx.Mo
     ]
     assert sorted(logged) == [(0, "ok"), (1, "timeout"), (2, "render_error")]
     assert "sk-9" not in stream.getvalue()
+
+
+class _NeverAsked:
+    """A port no request may reach."""
+
+    async def execute(self, call: HttpCall) -> HttpOutcome:
+        raise AssertionError(call.url)
+
+
+@pytest.mark.parametrize("outcome", ["paused", "timeout"])
+def test_an_unfetched_result_carries_the_redacted_url_and_no_answer(
+    outcome: Literal["paused", "timeout"],
+) -> None:
+    stream = json_log_stream()
+    fetcher = DynamicDataFetcher(_NeverAsked(), redis=None, org_id=ORG, clock=RecordingClock())
+    spec = _spec(url=f"{API}/orders?token=sk-9&phone={{{{to}}}}", method="POST", timing="every_turn")
+
+    result = fetcher.unfetched(spec, 3, SCOPE, outcome)
+
+    assert result == DynamicDataResult(
+        index=3, timing="every_turn", outcome=outcome, url=f"{API}/orders", method="POST"
+    )
+    assert (result.failed, result.level, result.readable) == (True, "warning", False)
+    assert result.event_data() == {
+        "url": f"{API}/orders",
+        "method": "POST",
+        "status_code": None,
+        "duration_ms": 0,
+        "variables_set": [],
+        "cached": False,
+        "outcome": outcome,
+        "timing": "every_turn",
+        "index": 3,
+    }
+    logged = [line for line in log_events(stream) if line["event"] == "tools.dynamic_data"]
+    assert [(line["index"], line["outcome"], line["duration_ms"]) for line in logged] == [(3, outcome, 0)]
+    assert "sk-9" not in stream.getvalue()
+
+
+def test_an_unfetched_result_of_a_url_that_does_not_render_has_no_url() -> None:
+    fetcher = DynamicDataFetcher(_NeverAsked(), redis=None, org_id=ORG, clock=RecordingClock())
+
+    result = fetcher.unfetched(_spec(url=f"{API}/orders?x={{{{to"), 1, SCOPE, "paused", duration_ms=7)
+
+    assert (result.url, result.outcome, result.duration_ms, result.timing) == ("", "paused", 7, "pre_call")
+    assert result.message() == "Dynamic data paused: endpoint not answering"
+
+
+def test_the_fetcher_exposes_its_clock() -> None:
+    clock = RecordingClock()
+
+    assert DynamicDataFetcher(_NeverAsked(), redis=None, org_id=ORG, clock=clock).clock is clock
 
 
 async def test_fetch_all_without_specs_touches_nothing() -> None:

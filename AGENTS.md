@@ -2200,3 +2200,18 @@ Grafana 3001
   exits 0. Any edit outside `.ralph/` after the run makes the stamp stale (restoring the file exactly makes it
   valid again); a run during which the tree changed exits 75 without a stamp. The phase exit gate still runs
   `make check` and `make e2e` fresh. Tests: `scripts/tests/test_ralph_gates.py` (fake `make`/`uv` on `PATH`).
+- 2026-11-06 (P08-FIX-23): a per-turn entry whose endpoint does not answer is paused (specs/13 §7 Decision
+  P08-FIX-23): after `PAUSE_AFTER` (2) consecutive committed `timeout`/`connection` fetches
+  `va_tools.turn_data.TurnDynamicData` skips it for `PAUSE_S` (30 s of the fetcher's clock, doubling per
+  unanswered probe to `MAX_PAUSE_S` 120 s) and reports it with the outcome `paused` (only per-turn fetches have
+  it; built by `DynamicDataFetcher.unfetched(spec, index, scope, "paused")`, which sends nothing). Streak and
+  pause change only in `commit`, like lines and names; any answered or unsent outcome ends the streak. Per-turn
+  answers are read up to `TURN_MAX_ANSWER_BYTES` (65 536; `TurnDataSource.for_call` passes it as the executor's
+  `max_bytes` and the fetcher's `max_cached_bytes`; a stored `dyn:` value above the fetcher's limit + 32 is a
+  miss, `tools.dynamic_data_cache_oversized`). Tests: respx `side_effect=httpx.ConnectError(...)` /
+  `ReadTimeout(...)` give `connection`/`timeout` at once (no budget wait), `clock.run_for(s)` moves the pause
+  (use binary-exact steps such as 0.5: 29.9 + 0.1 is not 30.0), and respx counts a request only when it
+  completes, so a held request cancelled at the budget leaves `route.call_count` at 0 (check
+  `HeldAnswer.arrived`). `coroutine.send(None)` raising `StopIteration` proves an async function returned
+  without suspending. Parse cost on the loop (one thread, `logs/probe_plan_fix23_parse.py`): 1 MiB with `$..x`
+  243 ms, 262 KiB 54 ms, 64 KiB 13.5 ms, 16 KiB 3.5 ms; `orjson.loads` of 1 MiB 8 ms.

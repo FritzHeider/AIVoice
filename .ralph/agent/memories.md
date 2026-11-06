@@ -2,6 +2,14 @@
 
 ## Patterns
 
+### mem-1793937053-037d
+> P08-FIX-23 gated without rebuilding (tree de88ab9b): scripts/ralph/gates.sh --e2e exit 0 on the first run from a warm stack (make test 13340 passed 920 s, coverage 99.09 %, make e2e 20 passed 419 s), --verify --e2e exit 0; jscpd 0 clones, radon 2.95, audits clean. A gating pass of ~27 min needs the Monitor heartbeat re-armed every 10 min (monitors expire at 600 s). Reviewer: verify the stamp, tick, add 2026-11-06-p08-t03b-third-pass.md to DONE, close task fix:turn-data-backoff; next P08-FIX-24
+<!-- tags: gates, dynamic-data, testing | created: 2026-11-06 -->
+
+### mem-1793935452-3477
+> P08-FIX-23 planned as a gating-only pass after a17bb86: the work tree (9 paths) holds it complete; planner check: make placeholders 0 findings, lint ok, spec refs 0, 145 targeted tests pass, va_tools.http maps UnsafeDestinationError('resolution') to outcome connection (so a failed name lookup counts as unanswered, as the Decision says). Builder runs scripts/ralph/gates.sh --e2e once (background + heartbeat), jscpd with --output outside the tree; a known e2e runner flake is retried once with gates.sh --only e2e on the same tree, never by touching thresholds. On approval: third-pass note to DONE, close task fix:turn-data-backoff, next P08-FIX-24
+<!-- tags: planning, gates, dynamic-data | created: 2026-11-06 -->
+
 ### mem-1793935318-8ef9
 > P08-FIX-26 approved and committed by path (gates.sh, test_ralph_gates.py, plan, .ralph/agent): reviewer verified the stamp (gates.sh --verify exit 0, own --fingerprint equal), --help and --only nonsense byte-identical to 3fe1ffc's script, real detector 4 findings on 3fe1ffc's script vs 0 now. Work tree still holds the complete unreviewed P08-FIX-23 (9 paths incl. AGENTS.md, specs/13, specs/19): next Builder does NOT rebuild it, runs scripts/ralph/gates.sh --e2e once + jscpd (--output outside the tree) + radon + audits, then build.done
 <!-- tags: gates, review, planning | created: 2026-11-06 -->

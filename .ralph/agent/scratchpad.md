@@ -1847,3 +1847,140 @@ modified and uncommitted. The plan tick makes the stamp stale; FIX-23's Builder 
 - Committed by path (gates.sh, test_ralph_gates.py, plan/phase-08.md, .ralph/agent); the nine P08-FIX-23 paths
   stay modified and uncommitted. The plan tick makes the stamp stale: P08-FIX-23's Builder runs
   `scripts/ralph/gates.sh --e2e` on the then-current tree (do NOT rebuild FIX-23, see its status note).
+
+## Planner 2026-11-06T03:40Z: after P08-FIX-26 (commit a17bb86)
+
+Inbox: no note newer than `2026-11-06-p08-t03b-fourth-pass.md` (01:22Z); `DONE` unchanged (third-pass goes in
+with P08-FIX-23, fourth-pass with P08-FIX-24). First unticked task with ticked dependencies: P08-FIX-23
+(depends on P08-T03b and P08-FIX-26, both ticked). It is BUILT in the work tree (9 paths, 850 insertions),
+never gated: `scripts/ralph/gates.sh --verify` → `no stamp for this tree (de88ab9b…)`, exit 1 (expected: the
+FIX-26 tick changed plan/phase-08.md).
+
+Planner sanity check of that tree (real output, 03:35Z): `make placeholders` → `0 finding(s)` exit 0 (the
+blocker is gone); `make lint` exit 0; `check_spec_refs` 0 problems; `uv run pytest
+packages/va_tools/tests/test_turn_data.py packages/va_tools/tests/test_dynamic_data.py
+apps/media_worker/tests/test_call_dynamic_data.py packages/va_events/tests/test_catalog.py -n 4 --no-cov`
+→ 145 passed. Source diff read (`turn_data.py`, `dynamic_data.py`, `call_dynamic_data.py`): matches
+"## Plan P08-FIX-23" (still valid, lines above) and "## Build P08-FIX-23". One point I checked because the
+Decision says a failed name lookup is unanswered: `va_tools.http` maps `UnsafeDestinationError("resolution")`
+to `connection` (http.py:188), every other refusal to `blocked`, so code and Decision agree.
+
+## Plan P08-FIX-23, gating pass (verify the existing work tree, do NOT rebuild)
+
+The design is "## Plan P08-FIX-23" above; the build record is "## Build P08-FIX-23". This activation only
+proves the tree and emits. Do not re-derive, restyle or extend the change.
+
+### Builder steps (PATH needs /home/ralph/.local/bin)
+
+1. `git status --short` must list exactly the nine paths: AGENTS.md,
+   apps/media_worker/src/va_media/call_dynamic_data.py, apps/media_worker/tests/test_call_dynamic_data.py,
+   packages/va_tools/src/va_tools/{dynamic_data,turn_data}.py, packages/va_tools/tests/test_{dynamic_data,
+   turn_data}.py, specs/13-tools-and-dynamic-data.md, specs/19-events-and-webhooks.md. Read `git diff` once
+   against the plan's semantics (items 1-7). Fix only a real defect; any edit outside `.ralph/` must happen
+   BEFORE step 3.
+2. `ls -t .ralph/review-inbox | head -3`: a note newer than `2026-11-06-p08-t03b-fourth-pass.md` about this
+   task is handled before the gates (blocker items fixed, others answered in the scratchpad).
+3. `make fmt` (must change nothing; if it does, that is an edit, see step 1), then the one full pass, in the
+   background with a heartbeat every ~2 min (AGENTS.md P05-T10d: 300 s of silence kills the iteration):
+   `scripts/ralph/gates.sh --e2e > logs/gates_fix23.log 2>&1` (lint, typecheck, detector gate, OpenAPI drift,
+   spec refs, `make test` ~15 min, `make e2e` ~7 min + image rebuild: the media worker image changes).
+   Then `scripts/ralph/gates.sh --verify --e2e` → exit 0; paste its table and the `✔ gates passed for tree …`
+   line.
+4. While/after: `npx --yes jscpd@4 --silent --output /var/tmp/jscpd_fix23` (output OUTSIDE the tree, or the
+   stamp run exits 75), `uvx radon cc -s -a apps packages scripts` (average < 10; `_fetch` stays C 11),
+   `uvx pip-audit` on `uv export`, `corepack pnpm audit --audit-level high`. None of these may write into the
+   tree while the stamp run is going.
+5. Scratchpad "## Gates P08-FIX-23" with the real numbers, then `build.done` as plain text with
+   `tests: pass, lint: pass, typecheck: pass, audit: pass, coverage: pass, duplication: pass, complexity: N.NN,`
+   (comma after the number).
+
+### If a gate fails
+
+- Fails in a P08-FIX-23 file: fix it (it is this task), re-run from step 3.
+- `make e2e` fails with a known runner flake (runtime task `fix:e2e-cold-start-flakes`: first flow before
+  Temporal serves polls on a cold stack; 1-10 opener-time underruns in the 50-call capacity flow right after
+  `make test` + rebuild): do NOT touch the flow or its thresholds. Confirm it is that flake from the logs
+  (`docker logs --since <ts> voiceagents-media-1 | grep -E 'outbound.underrun|gc_pause'`; the per-turn path
+  is not exercised by the capacity flow, its calls have no `dynamic_data`), wait ~30 s on the warm stack and
+  run `scripts/ralph/gates.sh --only e2e` (adds e2e to the same tree's stamp), then `--verify --e2e`. Record
+  both runs honestly (first run's failure included). A second failure of the same kind → `build.blocked`
+  with the output, not a third blind run.
+- Exit 75 (`no stamp written`): something changed the tree during the run (jscpd report, a formatter, a
+  generated file). Find it with `git status --short`, remove the cause, re-run.
+
+### For the Reviewer (on approval)
+
+- `scripts/ralph/gates.sh --verify --e2e`; exit 0 → re-run nothing. Review the nine-path diff against
+  specs/13 §7 Decision P08-FIX-23 and the plan's acceptance list (plan/phase-08.md P08-FIX-23).
+- Things worth a mutation/probe: (a) a `paused` result must neither advance nor reset the streak (probe
+  after a pause pauses again after ONE unanswered fetch, 30 → 60 → 120 → 120); (b) state only in `commit`
+  (two dropped refreshes + one applied does not pause); (c) `_stored_bytes` counts bytes for a
+  `decode_responses` client; boundary 65 536 stored and hit, 65 537 cut; (d) `fetch_all` logs one
+  `tools.dynamic_data` line per budget timeout (`unfetched` logs itself now).
+- Tick P08-FIX-23 (evidence line), append `2026-11-06-p08-t03b-third-pass.md` to `.ralph/review-inbox/DONE`,
+  commit (`fix(tools): pause a per-turn dynamic data entry whose endpoint does not answer`, footer
+  `Task: P08-FIX-23`), `ralph tools task close task-1793928628-1935` (key fix:turn-data-backoff).
+- Next for the Planner afterwards: P08-FIX-24 (pathway recorder/brain cycle), then P08-FIX-25, then P08-T03c.
+
+### Risks
+
+- The e2e flake above is the main one; the stack is cold-ish (last e2e was the T03b review, ~2 h ago) and
+  the media image rebuilds. `scripts/dev_up.sh e2e` inside `make e2e` waits for health, not for Temporal
+  task-queue readiness.
+- The full `make test` already passed once over this exact source (FIX-26's stamp run, 13 340 passed); only
+  plan/phase-08.md and `.ralph/` changed since, so a test failure now would be a flake or load: read it
+  before changing code.
+
+## Gates P08-FIX-23 (Builder, gating pass, 2026-11-06T03:22Z-03:53Z) — all green on the first run
+
+Nothing rebuilt and nothing edited outside `.ralph/`: `git status --short` lists exactly the nine planned paths
+before and after. Source diff (`turn_data.py`, `dynamic_data.py`, `call_dynamic_data.py`) read once against the
+plan's semantics: no defect found (streak/pause only in `commit`, a `paused` result neither advances nor ends
+the streak, a probe after a pause re-pauses doubled up to 120 s, `unfetched` logs itself so a budget timeout is
+logged once, stored-value size checked in bytes before parsing). Inbox: newest note is still
+`2026-11-06-p08-t03b-fourth-pass.md`, nothing new about this task.
+
+Real results on tree de88ab9b869a4816504cc185bff359ae664248fc:
+- `make fmt` exit 0, changed nothing.
+- `scripts/ralph/gates.sh --e2e > logs/gates_fix23.log` → exit 0,
+  `✔ gates passed for tree de88ab9b869a4816504cc185bff359ae664248fc: lint typecheck <detector> openapi specs test e2e`.
+- `scripts/ralph/gates.sh --verify --e2e` → exit 0:
+    lint pass 7s · typecheck pass 4s · detector gate pass 5s `0 finding(s)` · openapi pass 4s (`internal.json is
+    current`) · specs pass 0s `0 problem(s)` · test pass 929s `13340 passed, 7 skipped in 920.38s`, coverage total
+    99.09 % · e2e pass 602s `20 passed, 107 deselected in 419.45s` (first run, no flake; images rebuilt, stack was warm).
+- `npx --yes jscpd@4 --silent --output /var/tmp/jscpd_fix23` → 0 clones (1917 files).
+- `uvx radon cc -s -a apps packages scripts` → average A (2.95); in the touched files only `_unstorable` and
+  `DynamicDataFetcher._fetch` are C (11), both as before this task.
+- `uvx pip-audit --strict -r <uv export> --disable-pip --require-hashes` → no known vulnerabilities;
+  `corepack pnpm audit --audit-level high` exit 0 (1 moderate, unchanged; no dependency touched).
+- No TypeScript changed, so no test-ts.
+
+For the Reviewer: `scripts/ralph/gates.sh --verify --e2e` exits 0 as long as nothing outside `.ralph/` changes.
+On approval: tick P08-FIX-23, append `2026-11-06-p08-t03b-third-pass.md` to `.ralph/review-inbox/DONE`, commit
+(`fix(tools): pause a per-turn dynamic data entry whose endpoint does not answer`, footer `Task: P08-FIX-23`),
+`ralph tools task close task-1793928628-1935`.
+
+## Review P08-FIX-23 (Reviewer, 2026-11-06T04:00Z) — APPROVED
+
+- Gates: `scripts/ralph/gates.sh --verify --e2e` → exit 0 on tree de88ab9b869a4816504cc185bff359ae664248fc
+  (lint, typecheck, detector gate `0 finding(s)`, openapi, specs, test `13340 passed, 7 skipped`, e2e
+  `20 passed`). Nothing re-run (stamp valid).
+- Diff read (nine paths) against specs/13 §7 Decision P08-FIX-23 items 1-7, the amended P08-T03a rules 2, 3, 6 +
+  Event paragraph, P08-T03b items 2, 3, and the specs/19 §2 row: constants 2 / 30 s / 120 s / 65 536, outcome
+  `paused` (level warning, fixed message, data nulls/zeros), streak + pause only in `commit`, a `paused` result
+  neither advances nor ends the streak, `now < paused_until` (probe at the pause end), all-paused refresh
+  awaits nothing (`fetch_all([])` returns at once), stored-size check in bytes before parsing, store limit =
+  the fetcher's. No other exhaustive consumer of the outcome values (grep: api/dashboard/sdk only describe the
+  tool test result). The pause log carries no URL.
+- Mutations (file copied to /var/tmp/rv23, mutated in place, restored byte for byte; stamp verifies after):
+  M1 paused result resets the streak → 2 failed; M2 `<=` at the pause end → 2 failed; M3 no doubling → 1;
+  M4 no cap → 1; M5 `len(raw)` for text → 1; M6 no wrapper slack → 1; M7 counting at refresh → 1;
+  M8 `connection` not unanswered → 10; M9 store by the default limit → 1. Baseline 125 passed.
+- Own probe `logs/probe_review_fix23_test.py` (git-ignored): through `refresh_turn`/`commit_refresh`, a held
+  entry beside an answering one: one `tools.dynamic_data` line per budget timeout, the sibling answers inside
+  the budget, the third turn sends nothing to the paused entry and reports `paused` → 1 passed.
+- Noted, not a finding: a hung Redis `GET` that eats the 0.8 s budget also reads `timeout` and counts towards
+  the pause (the Decision's wording "the turn's budget ... ran out" covers it; pausing then also spares the
+  turn the wait).
+- Inbox: `2026-11-06-p08-t03b-third-pass.md` appended to DONE (items 1-3 by 6d80843, 4-5 here); the
+  fourth-pass note stays open for P08-FIX-24. Next for the Planner: P08-FIX-24, P08-FIX-25, P08-T03c.

@@ -10,9 +10,11 @@ Rules: specs/13 §7 Decision P08-T03a. :meth:`DynamicDataFetcher.fetch` runs one
    under :func:`cache_key` first. A stored ``{"status": int, "body": JSON}`` whose body is a JSON document
    (rule 4) is a hit: no request, outcome ``ok``, ``cached``. Any other stored value (not that shape, or
    a body that is text, a bare string, nothing or ``null``, which an earlier build could store) and a Redis
-   failure are misses.
+   failure are misses. So is a stored value longer than the fetcher's ``max_cached_bytes`` plus the wrapper
+   (checked before it is parsed): a fetcher hits exactly what it would store, whoever stored the value.
 3. On a miss the request goes through the :class:`~va_engine.ports.HttpPort` (SSRF guard, size cap; no
-   retries). Only a ``readable`` 2xx answer (rule 4) whose compact JSON is at most :data:`MAX_CACHED_BYTES`
+   retries). Only a ``readable`` 2xx answer (rule 4) whose compact JSON is at most the fetcher's
+   ``max_cached_bytes`` (:data:`MAX_CACHED_BYTES` unless the fetcher was built with a smaller limit)
    is stored (``SET … EX cache_ttl_seconds``); a failed write is ignored. Failures are never cached, and
    neither is a 2xx answer that is not readable: it says nothing about the data, so the endpoint is asked
    again by the next fetch, as after a failure. The key covers the org, the method, the rendered URL and
@@ -37,6 +39,10 @@ timing, outcome, status, the cache flag, the duration and the number of variable
 bodies or values. :meth:`DynamicDataFetcher.fetch_all` runs several specs concurrently in ONE scope (no fetch
 sees another's variables) within a budget on the injected clock; what is not finished by then is cancelled
 and reported as ``timeout``.
+
+:meth:`DynamicDataFetcher.unfetched` is the result of a fetch that produced no answer of its own: one that
+missed the budget (``timeout``) or one the caller did not start (``paused``, which only the per-turn fetches
+of :mod:`va_tools.turn_data` report, specs/13 §7 Decision P08-FIX-23). It sends nothing and reads no cache.
 """
 
 from __future__ import annotations
@@ -92,9 +98,11 @@ MAX_VARIABLE_DEPTH: Final = 32
 """Arrays and objects nested inside one another in one extracted value (a scalar is 0, ``[1]`` is 1); a
 deeper value is not set."""
 MAX_CACHED_BYTES: Final = 262_144
-"""Compact JSON of a response body; a larger one is not cached."""
+"""Compact JSON of a response body; a larger one is not cached (a fetcher may have a smaller limit)."""
+_ENVELOPE_BYTES: Final = 32
+"""Room for the ``{"status":NNN,"body":}`` wrapper (22 bytes) around a stored body."""
 
-type DynamicOutcome = HttpOutcomeKind | Literal["render_error", "error"]
+type DynamicOutcome = HttpOutcomeKind | Literal["render_error", "error", "paused"]
 type DynamicTiming = Literal["pre_call", "every_turn"]
 
 _log = get_logger(__name__)
@@ -188,6 +196,8 @@ class DynamicDataResult:
 
     def message(self) -> str:
         """The event message."""
+        if self.outcome == "paused":
+            return "Dynamic data paused: endpoint not answering"
         if self.failed:
             status = f" ({self.status_code})" if self.status_code is not None else ""
             return f"Dynamic data failed: {self.outcome}{status}"
@@ -238,6 +248,13 @@ def _json_document(body: JsonValue, *, truncated: bool) -> bool:
     return not truncated and body is not None and not isinstance(body, str)
 
 
+def _stored_bytes(raw: object) -> int:
+    """The size of a stored cache value in bytes (0 for a value that is no text)."""
+    if isinstance(raw, str):
+        return len(raw.encode())
+    return len(raw) if isinstance(raw, bytes | bytearray) else 0
+
+
 def _cached_answer(raw: object) -> tuple[int, JsonValue] | None:
     """The ``(status, body)`` of a stored answer; ``None`` when the value is not one or its body is not a
     JSON document (only readable answers are stored, so such a value says nothing about the data)."""
@@ -261,14 +278,29 @@ def _cached_answer(raw: object) -> tuple[int, JsonValue] | None:
 class DynamicDataFetcher:
     """Runs the dynamic data specs of one org's conversation over ``http`` (see the module docstring).
 
-    ``redis`` ``None`` disables the cache.
+    ``redis`` ``None`` disables the cache. ``max_cached_bytes`` bounds the compact JSON of a body this
+    fetcher stores and, plus the wrapper, the stored value it reads (a longer one is a miss).
     """
 
-    def __init__(self, http: HttpPort, *, redis: Redis | None, org_id: uuid.UUID, clock: Clock) -> None:
+    def __init__(
+        self,
+        http: HttpPort,
+        *,
+        redis: Redis | None,
+        org_id: uuid.UUID,
+        clock: Clock,
+        max_cached_bytes: int = MAX_CACHED_BYTES,
+    ) -> None:
         self._http = http
         self._redis = redis
         self._org_id = org_id
         self._clock = clock
+        self._max_cached_bytes = max_cached_bytes
+
+    @property
+    def clock(self) -> Clock:
+        """The clock the fetches are timed and bounded on."""
+        return self._clock
 
     async def fetch(
         self, spec: DynamicDataSpec, index: int, scope: TemplateScope, *, timeout_ms: int
@@ -307,10 +339,39 @@ class DynamicDataFetcher:
         results: list[DynamicDataResult] = []
         for (index, spec), task in zip(specs, tasks, strict=True):
             if task.cancelled():
-                results.append(self._logged(self._timed_out(spec, index, scope, budget_s)))
+                duration_ms = round(budget_s * 1000)
+                results.append(self.unfetched(spec, index, scope, "timeout", duration_ms=duration_ms))
             else:
                 results.append(task.result())
         return results
+
+    def unfetched(
+        self,
+        spec: DynamicDataSpec,
+        index: int,
+        scope: TemplateScope,
+        outcome: Literal["timeout", "paused"],
+        *,
+        duration_ms: int = 0,
+    ) -> DynamicDataResult:
+        """The result of a fetch of ``spec`` that produced no answer of its own: ``timeout`` for one that
+        missed its budget, ``paused`` for one the caller did not start. Nothing is sent and no cache is
+        read; the URL is the rendered one without user info, query or fragment (empty when it does not
+        render)."""
+        try:
+            url = redacted_url(render_request(_request_spec(spec, index, 0), scope).call.url)
+        except ToolRenderError:
+            url = ""
+        return self._logged(
+            DynamicDataResult(
+                index=index,
+                timing=spec.timing,
+                outcome=outcome,
+                url=url,
+                method=spec.method,
+                duration_ms=duration_ms,
+            )
+        )
 
     # One fetch.
 
@@ -400,8 +461,7 @@ class DynamicDataFetcher:
 
     # The cache.
 
-    @staticmethod
-    async def _lookup(redis: Redis, key: str, index: int) -> tuple[int, JsonValue] | None:
+    async def _lookup(self, redis: Redis, key: str, index: int) -> tuple[int, JsonValue] | None:
         try:
             raw = await redis.get(key)
         except (RedisError, OSError) as exc:
@@ -409,38 +469,26 @@ class DynamicDataFetcher:
             return None
         if raw is None:
             return None
+        if _stored_bytes(raw) > self._max_cached_bytes + _ENVELOPE_BYTES:
+            _log.info("tools.dynamic_data_cache_oversized", index=index)
+            return None
         answer = _cached_answer(raw)
         if answer is None:
             _log.warning("tools.dynamic_data_cache_invalid", index=index)
         return answer
 
-    @staticmethod
-    async def _store(redis: Redis, key: str, ttl_s: int, answer: tuple[int, JsonValue], index: int) -> None:
+    async def _store(
+        self, redis: Redis, key: str, ttl_s: int, answer: tuple[int, JsonValue], index: int
+    ) -> None:
         status, body = answer
         try:
-            if len(_compact(body).encode()) > MAX_CACHED_BYTES:
+            if len(_compact(body).encode()) > self._max_cached_bytes:
                 return
             await redis.set(key, _compact({"status": status, "body": body}), ex=ttl_s)
         except (RedisError, OSError, ValueError, TypeError, RecursionError) as exc:
             _log.warning("tools.dynamic_data_cache_write_failed", index=index, error_type=type(exc).__name__)
 
     # Reporting.
-
-    def _timed_out(
-        self, spec: DynamicDataSpec, index: int, scope: TemplateScope, budget_s: float
-    ) -> DynamicDataResult:
-        try:
-            url = redacted_url(render_request(_request_spec(spec, index, 0), scope).call.url)
-        except ToolRenderError:
-            url = ""
-        return DynamicDataResult(
-            index=index,
-            timing=spec.timing,
-            outcome="timeout",
-            url=url,
-            method=spec.method,
-            duration_ms=round(budget_s * 1000),
-        )
 
     @staticmethod
     def _logged(result: DynamicDataResult) -> DynamicDataResult:

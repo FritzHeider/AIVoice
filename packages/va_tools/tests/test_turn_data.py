@@ -1,4 +1,5 @@
-"""Per-turn dynamic data (specs/13 §7 Decision P08-T03b) over respx, fakeredis and a manual clock."""
+"""Per-turn dynamic data (specs/13 §7 Decisions P08-T03b and P08-FIX-23) over respx, fakeredis and a manual
+clock."""
 
 from __future__ import annotations
 
@@ -25,7 +26,15 @@ from va_engine.ports import HttpCall, HttpOutcome
 from va_engine.templating import TemplateScope
 from va_engine.turn_data import TurnData, TurnRefresh, commit_refresh
 from va_tools.dynamic_data import DynamicDataFetcher, DynamicDataResult
-from va_tools.turn_data import TURN_BUDGET_S, TURN_TIMEOUT_MS, TurnDynamicData, turn_specs
+from va_tools.turn_data import (
+    MAX_PAUSE_S,
+    PAUSE_AFTER,
+    PAUSE_S,
+    TURN_BUDGET_S,
+    TURN_TIMEOUT_MS,
+    TurnDynamicData,
+    turn_specs,
+)
 
 SCOPE = TemplateScope(variables={"tier": "gold"}, request_data={}, builtins={"to": "+14155550123"})
 ITEMS = [
@@ -507,6 +516,314 @@ async def test_a_reporter_that_raises_costs_the_turn_nothing(api: respx.MockRout
     assert data.sections() == ("Their plan is silver.",)
     failures = [line for line in log_events(stream) if line["event"] == "tools.turn_data_event_failed"]
     assert [line["error_type"] for line in failures] == ["RuntimeError"]
+
+
+# An endpoint that does not answer is paused (Decision P08-FIX-23).
+
+PLATINUM: dict[str, JsonValue] = {"plan": "platinum", "balance": 12}
+PAUSED_MESSAGE = "Dynamic data paused: endpoint not answering"
+EDGE_S = 0.5
+"""How long before the end of a pause the tests look again (binary-exact, so the sums are too)."""
+
+
+def _refused() -> httpx.ConnectError:
+    return httpx.ConnectError("refused")
+
+
+def _gold_plan(fetcher: DynamicDataFetcher, reported: _Reported | None = None) -> TurnDynamicData:
+    """The plan entry (index 0) with the gold lines of an earlier fetch."""
+    return TurnDynamicData(fetcher, [(0, _spec())], initial={0: GOLD}, events=reported)
+
+
+async def _turns(data: TurnDynamicData, count: int) -> list[dict[str, JsonValue]]:
+    """``count`` applied refreshes; the variables of each."""
+    return [await _refreshed(data) for _ in range(count)]
+
+
+def test_the_pause_constants_are_the_documented_ones() -> None:
+    assert (PAUSE_AFTER, PAUSE_S, MAX_PAUSE_S) == (2, 30.0, 120.0)
+
+
+@pytest.mark.parametrize(
+    ("failure", "outcome"),
+    [(httpx.ReadTimeout("slow"), "timeout"), (httpx.ConnectError("refused"), "connection")],
+    ids=["timeout", "connection"],
+)
+async def test_two_unanswered_fetches_pause_the_entry(
+    api: respx.MockRouter, failure: Exception, outcome: str
+) -> None:
+    route = api.get("/plan").mock(side_effect=failure)
+    reported = _Reported()
+    async with manual_fetcher() as (_clock, fetcher):
+        data = _gold_plan(fetcher, reported)
+        variables = await _turns(data, 3)
+
+    assert variables == [{}, {}, {}]
+    assert route.call_count == 2
+    assert reported.outcomes() == [(0, outcome, "warning"), (0, outcome, "warning"), (0, "paused", "warning")]
+    paused = reported.results[2]
+    assert paused.message() == PAUSED_MESSAGE
+    assert paused.event_data() == {
+        "url": f"{API}/plan",
+        "method": "GET",
+        "status_code": None,
+        "duration_ms": 0,
+        "variables_set": [],
+        "cached": False,
+        "outcome": "paused",
+        "timing": "every_turn",
+        "index": 0,
+    }
+    assert data.sections() == tuple(GOLD)
+
+
+async def _over_budget(clock: ManualClock, data: TurnDynamicData, slow: HeldAnswer) -> dict[str, JsonValue]:
+    """One applied refresh whose held request runs out of the turn's budget; its variables."""
+    slow.arrived.clear()
+    running = asyncio.create_task(data.refresh(SCOPE))
+    async with asyncio.timeout(5):
+        await slow.arrived.wait()
+    await clock.wait_for_sleep(TURN_BUDGET_S)
+    await clock.run_for(TURN_BUDGET_S)
+    return _applied(await running)
+
+
+async def test_a_budget_timeout_counts_as_unanswered(api: respx.MockRouter) -> None:
+    """The fetch the refresh cancels at its budget, not only the request the executor times out."""
+    slow = HeldAnswer(PLATINUM)
+    api.get("/plan").mock(side_effect=slow)
+    reported = _Reported()
+    async with manual_fetcher() as (clock, fetcher):
+        data = _gold_plan(fetcher, reported)
+        first = await _over_budget(clock, data, slow)
+        second = await _over_budget(clock, data, slow)
+        slow.arrived.clear()
+        third = await _refreshed(data)
+
+    assert (first, second, third) == ({}, {}, {})
+    assert not slow.arrived.is_set()  # respx counts only requests that completed: none did, and no third came
+    assert [outcome for _, outcome, _ in reported.outcomes()] == ["timeout", "timeout", "paused"]
+    assert data.sections() == tuple(GOLD)
+
+
+async def test_a_refresh_of_paused_entries_does_not_wait(api: respx.MockRouter) -> None:
+    api.get("/plan").mock(side_effect=_refused())
+    api.get("/orders").mock(side_effect=_refused())
+    reported = _Reported()
+    async with manual_fetcher() as (clock, fetcher):
+        data = _plan_and_orders(fetcher, reported)
+        await _turns(data, 2)
+
+        refresh = data.refresh(SCOPE)
+        with pytest.raises(StopIteration) as finished:  # it returns without suspending once
+            refresh.send(None)
+        fetched: TurnRefresh = finished.value.value
+
+        assert clock.sleepers == 0
+        assert _applied(fetched) == {}
+
+    assert reported.outcomes()[4:] == [(0, "paused", "warning"), (2, "paused", "warning")]
+    assert data.sections() == (*GOLD, LAST_ORDER)
+
+
+async def test_only_the_unanswering_entry_is_paused(api: respx.MockRouter) -> None:
+    plan = api.get("/plan").mock(side_effect=_refused())
+    orders = api.get("/orders").mock(
+        side_effect=[httpx.Response(200, json={"last": {"id": f"A-{number}"}}) for number in (8, 9, 10)]
+    )
+    reported = _Reported()
+    async with manual_fetcher() as (_clock, fetcher):
+        data = _plan_and_orders(fetcher, reported)
+        variables = await _turns(data, 3)
+
+    assert variables == [{"order": "A-8"}, {"order": "A-9"}, {"order": "A-10"}]
+    assert (plan.call_count, orders.call_count) == (2, 3)
+    assert reported.outcomes()[4:] == [(0, "paused", "warning"), (2, "ok", "info")]
+    assert data.sections() == (*GOLD, "Last order: A-10.")
+
+
+async def test_the_pause_ends_after_30_s_and_an_answered_probe_resumes_the_entry(
+    api: respx.MockRouter,
+) -> None:
+    route = api.get("/plan").mock(
+        side_effect=[
+            _refused(),
+            _refused(),
+            httpx.Response(200, json=PLATINUM),
+            _refused(),
+            httpx.Response(200, json={"plan": "silver", "balance": 0}),
+        ]
+    )
+    reported = _Reported()
+    async with manual_fetcher() as (clock, fetcher):
+        data = _gold_plan(fetcher, reported)
+        await _turns(data, 2)
+        await clock.run_for(PAUSE_S - EDGE_S)
+        still_paused = await _refreshed(data)
+        sent_while_paused = route.call_count
+        await clock.run_for(EDGE_S)
+        probe = await _refreshed(data)
+        lines = data.sections()
+        after_one_failure = await _turns(data, 2)  # the streak starts again: one failure pauses nothing
+
+    assert (still_paused, sent_while_paused) == ({}, 2)
+    assert probe == PLATINUM
+    assert lines == ("Their plan is platinum.", "They owe 12.")
+    assert after_one_failure == [{}, {"plan": "silver", "balance": 0}]
+    assert route.call_count == 5
+    assert [outcome for _, outcome, _ in reported.outcomes()] == [
+        "connection",
+        "connection",
+        "paused",
+        "ok",
+        "connection",
+        "ok",
+    ]
+
+
+async def test_an_unanswered_probe_pauses_twice_as_long_up_to_two_minutes(api: respx.MockRouter) -> None:
+    stream = json_log_stream()
+    route = api.get("/plan").mock(side_effect=_refused())
+    sent: list[tuple[float, int, int]] = []
+    async with manual_fetcher() as (clock, fetcher):
+        data = _gold_plan(fetcher)
+        await _turns(data, 2)
+        for pause_s in (30.0, 60.0, 120.0, 120.0):
+            before = route.call_count
+            await clock.run_for(pause_s - EDGE_S)
+            await _refreshed(data)
+            during = route.call_count - before
+            await clock.run_for(EDGE_S)
+            await _refreshed(data)  # the probe: unanswered, so the entry is paused again at once
+            sent.append((pause_s, during, route.call_count - before))
+        await _refreshed(data)
+
+    assert sent == [(30.0, 0, 1), (60.0, 0, 1), (120.0, 0, 1), (120.0, 0, 1)]
+    assert route.call_count == 6
+    pauses = [line for line in log_events(stream) if line["event"] == "tools.turn_data_paused"]
+    assert [(line["pause_s"], line["unanswered"]) for line in pauses] == [
+        (30.0, 2),
+        (60.0, 3),
+        (120.0, 4),
+        (120.0, 5),
+        (120.0, 6),
+    ]
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        httpx.Response(500),
+        httpx.Response(200, json={"plan": "silver"}),
+        httpx.Response(200, text="<html>Bad gateway</html>"),
+    ],
+    ids=["http_error", "ok", "unreadable"],
+)
+async def test_an_answered_fetch_between_two_unanswered_ones_resets_the_streak(
+    api: respx.MockRouter, answer: httpx.Response
+) -> None:
+    route = api.get("/plan").mock(
+        side_effect=[_refused(), answer, _refused(), httpx.Response(200, json=PLATINUM)]
+    )
+    reported = _Reported()
+    async with manual_fetcher() as (_clock, fetcher):
+        data = _gold_plan(fetcher, reported)
+        variables = await _turns(data, 4)
+
+    assert variables[3] == PLATINUM
+    assert route.call_count == 4
+    assert "paused" not in [outcome for _, outcome, _ in reported.outcomes()]
+
+
+@pytest.mark.parametrize(
+    ("fields", "outcome"),
+    [({"url": "http://api.acme.test/plan"}, "blocked"), ({"headers": {"X-Token": "{{to"}}, "render_error")],
+    ids=["blocked", "render_error"],
+)
+async def test_a_request_that_is_never_sent_does_not_pause_the_entry(
+    api: respx.MockRouter, fields: dict[str, Any], outcome: str
+) -> None:
+    route = api.get("/plan").respond(200, json=PLATINUM)
+    reported = _Reported()
+    async with manual_fetcher() as (_clock, fetcher):
+        data = TurnDynamicData(fetcher, [(0, _spec(**fields))], initial={0: GOLD}, events=reported)
+        await _turns(data, 4)
+
+    assert route.call_count == 0
+    assert reported.outcomes() == [(0, outcome, "warning")] * 4
+
+
+async def test_unanswered_fetches_of_refreshes_that_are_never_applied_count_nothing(
+    api: respx.MockRouter,
+) -> None:
+    route = api.get("/plan").mock(side_effect=_refused())
+    reported = _Reported()
+    async with manual_fetcher() as (_clock, fetcher):
+        data = _gold_plan(fetcher, reported)
+        await data.refresh(SCOPE)  # two turns cut before their commit
+        await data.refresh(SCOPE)
+        await _turns(data, 2)
+        sent_until_the_second_commit = route.call_count
+        await _refreshed(data)
+
+    assert sent_until_the_second_commit == 4
+    assert route.call_count == 4
+    assert [outcome for _, outcome, _ in reported.outcomes()] == ["connection", "connection", "paused"]
+
+
+async def test_a_paused_result_that_is_never_applied_is_not_reported(api: respx.MockRouter) -> None:
+    api.get("/plan").mock(side_effect=_refused())
+    reported = _Reported()
+    async with manual_fetcher() as (_clock, fetcher):
+        data = _gold_plan(fetcher, reported)
+        await _turns(data, 2)
+        dropped = await data.refresh(SCOPE)
+
+    assert [result.outcome for result in dropped.results] == ["paused"]
+    assert len(reported.results) == 2
+
+
+async def test_a_paused_later_entry_keeps_the_name_it_shares(api: respx.MockRouter) -> None:
+    api.get("/plan").respond(200, json={"plan": "silver"})
+    upgrade = api.get("/upgrade").mock(
+        side_effect=[httpx.Response(200, json={"plan": "platinum"}), _refused(), _refused()]
+    )
+    async with manual_fetcher() as (_clock, fetcher):
+        data = _shared_plan(fetcher)
+        variables = await _turns(data, 4)
+
+    assert variables == [{"plan": "platinum"}, {}, {}, {}]
+    assert upgrade.call_count == 3
+    assert data.sections() == ("Their plan is silver.", "Their plan is platinum.")
+
+
+async def test_another_call_s_entry_is_not_paused(api: respx.MockRouter) -> None:
+    route = api.get("/plan").mock(side_effect=_refused())
+    other_call = _Reported()
+    async with manual_fetcher() as (_clock, fetcher):
+        await _turns(_gold_plan(fetcher), 3)
+        sent_by_the_paused_call = route.call_count
+        await _refreshed(_gold_plan(fetcher, other_call))
+
+    assert sent_by_the_paused_call == 2
+    assert route.call_count == 3
+    assert other_call.outcomes() == [(0, "connection", "warning")]
+
+
+async def test_a_pause_is_logged_once_without_the_url(api: respx.MockRouter) -> None:
+    stream = json_log_stream()
+    api.get("/plan").mock(side_effect=_refused())
+    async with manual_fetcher() as (_clock, fetcher):
+        await _turns(_gold_plan(fetcher), 4)
+
+    lines = log_events(stream)
+    pauses = [line for line in lines if line["event"] == "tools.turn_data_paused"]
+    assert [(line["index"], line["pause_s"], line["unanswered"], line["level"]) for line in pauses] == [
+        (0, 30.0, 2, "warning")
+    ]
+    assert not [value for value in pauses[0].values() if "acme" in str(value)]
+    fetches = [line["outcome"] for line in lines if line["event"] == "tools.dynamic_data"]
+    assert fetches == ["connection", "connection", "paused", "paused"]
 
 
 class _Signalling:

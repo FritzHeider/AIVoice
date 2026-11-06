@@ -567,12 +567,17 @@ Send Call `dynamic_data` (also persona/agent/inbound configs):
 >    document (rule 4) is a hit (no request, outcome `ok`, `cached: true`, the JSONPaths applied to the stored
 >    body). Any other stored value is a miss, logged `tools.dynamic_data_cache_invalid`: one that does not
 >    parse into that shape, and (amended 2026-11-06) one whose body is text, a bare string, nothing or `null`,
->    which only a build before this amendment could have stored. A Redis failure is a miss too.
+>    which only a build before this amendment could have stored. A Redis failure is a miss too. So is
+>    (amended 2026-11-06, Decision P08-FIX-23 item 6) a stored value longer than the fetcher's cache limit
+>    plus 32 bytes for the wrapper, checked before it is parsed and logged `tools.dynamic_data_cache_oversized`:
+>    a fetcher hits exactly what it would store, whoever stored the value.
 > 3. On a miss the request goes through the shared HTTP executor (specs/13 §9 Decision 2026-11-03) with
 >    `User-Agent` and `X-VA-Call-Id` and **without a signature**: step 4 of §5 signs tool requests only, and a
 >    dynamic data endpoint authenticates the platform by its own header, as in the example above. Only a
 >    *readable* 2xx answer (rule 4: a whole JSON document, so never a truncated one) whose compact JSON is at
->    most 262 144 bytes is stored (`SET … EX cache_ttl_seconds`); a failed write is logged and ignored.
+>    most 262 144 bytes (the fetcher's cache limit, `max_cached_bytes`; 65 536 for the media worker's per-turn
+>    fetches, Decision P08-FIX-23 item 6) is stored (`SET … EX cache_ttl_seconds`); a failed write is logged
+>    and ignored.
 >    Failures are never cached, and (amended 2026-11-06) neither is a 2xx answer that is not readable (a
 >    proxy's 200 HTML page, an empty 200/204, a bare JSON string): it says nothing about the data, so like a
 >    500 it must not keep the endpoint from being asked again, by the next turn and by every other call of
@@ -594,7 +599,9 @@ Send Call `dynamic_data` (also persona/agent/inbound configs):
 >    variables in front of the scope's, stripped and cut to 2 000 characters; a blank result or a template that
 >    does not parse gives no line.
 > 6. Every outcome but `ok` (`http_error`, `timeout`, `connection`, `blocked`, `invalid_url`, `render_error`, and
->    `error` for anything else that raised) sets nothing and is a `warning`.
+>    `error` for anything else that raised) sets nothing and is a `warning`. Amended 2026-11-06: per-turn
+>    fetches have one more outcome, `paused` (an entry that was not fetched because its endpoint has not been
+>    answering; Decision P08-FIX-23 below); a pre-call fetch never has it.
 >
 > **Several fetches** (`fetch_all`) run concurrently, each rendered in the SAME scope (a fetch never sees another
 > fetch's variables), within one budget on the injected clock; a fetch not finished by then is cancelled and
@@ -616,8 +623,9 @@ Send Call `dynamic_data` (also persona/agent/inbound configs):
 > specs/07 §3) carries no dynamic data. The worker shares one guarded tool HTTP client between these fetches and
 > the pathway test runs.
 >
-> **Event** `call.dynamic_data`: message `Dynamic data: {n} variables set` (`1 variable set`; plus ` (cached)`) or
-> `Dynamic data failed: {outcome}` (plus ` ({status})` when a response arrived); data `{url, method, status_code,
+> **Event** `call.dynamic_data`: message `Dynamic data: {n} variables set` (`1 variable set`; plus ` (cached)`),
+> `Dynamic data failed: {outcome}` (plus ` ({status})` when a response arrived) or, for the outcome `paused`
+> (Decision P08-FIX-23), `Dynamic data paused: endpoint not answering`; data `{url, method, status_code,
 > duration_ms, variables_set, cached, outcome, timing, index}` where `url` has no user info, query or fragment
 > (empty when it could not be rendered) and `index` is the spec's position in `dynamic_data`. Logs
 > (`tools.dynamic_data`) carry the index, timing, outcome, status, cache flag, duration and variable count only.
@@ -644,17 +652,19 @@ Send Call `dynamic_data` (also persona/agent/inbound configs):
 >    variables, the context lines and `opener_text`.
 > 2. **Refresh.** At the start of each user turn (speech or keypad; not the opener, not a `wait_for_greeting`
 >    greeting, not a no-input or node wait timeout, not a chained pass or a tool round, and not a turn refused
->    by `maxTotalTurns`) every `every_turn` entry is fetched again, all concurrently and in ONE scope (the
+>    by `maxTotalTurns`) every `every_turn` entry that is not paused (amended 2026-11-06, Decision
+>    P08-FIX-23) is fetched again, all concurrently and in ONE scope (the
 >    call's current variables, `request_data`, built-ins), each request with `timeout_ms` 800
 >    (`va_tools.turn_data.TURN_TIMEOUT_MS`) and no retries, the whole refresh within 0.8 s of the call clock
 >    (`TURN_BUDGET_S`). The request, cache and extraction rules are P08-T03a's (`cache: true` usually means a
->    Redis hit; the media worker uses the same Redis as the worker, so `dyn:` entries are shared); requests are
->    not signed.
+>    Redis hit; the media worker uses the same Redis as the worker, so `dyn:` entries are shared, up to the
+>    per-turn size limit of Decision P08-FIX-23 item 6); requests are not signed.
 > 3. **Result.** A fetch that succeeded with a readable answer (P08-T03a rule 4: a whole JSON document): its
 >    variables are set over the call's variables (a later entry wins a name) and its lines replace that
 >    fetch's earlier lines wholesale (a variable the answer no longer has keeps its value, as "a null sets
 >    nothing" in P08-T03a, and loses its line). A failed or timed-out fetch changes nothing: the earlier value
->    and lines stay (the stale value). Neither does a 2xx answer that is not readable (an empty body, a body
+>    and lines stay (the stale value), and neither does an entry that is paused and so not fetched (Decision
+>    P08-FIX-23 item 3). Neither does a 2xx answer that is not readable (an empty body, a body
 >    that is not JSON, a body cut at the size cap): it says nothing about the data, so a proxy's 200 error
 >    page or one oversized answer must not erase context a 500 would have kept; its event is still `ok` with
 >    `variables_set: []` (and it is not cached, P08-T03a rule 3, so the next turn asks the endpoint again).
@@ -705,6 +715,61 @@ Send Call `dynamic_data` (also persona/agent/inbound configs):
 > updated only by `commit`, never by a refresh) over the
 > `DynamicDataFetcher`; the media worker's `va_media.call_dynamic_data.TurnDataSource` (the shared tool HTTP
 > client, Redis, clock) builds one per call that has `every_turn` entries.
+
+> Decision (2026-11-06) P08-FIX-23: a per-turn entry whose endpoint does not answer is paused, and per-turn
+> answers are read up to 64 KiB. Before this, every caller turn asked every `every_turn` entry again with
+> 800 ms and no memory of the turn before, so an endpoint that hung cost each turn of the call up to 0.8 s
+> (a task call: before its first LLM request) for as long as it hung; and an answer of up to 1 MiB was parsed
+> and searched on the media worker's event loop, which paces the audio of every call of the pod.
+>
+> 1. **Unanswered.** A per-turn fetch is *unanswered* when its outcome is `timeout` or `connection`: no
+>    response arrived (the turn's budget or the request timeout ran out, the connection or the name lookup
+>    failed). Every other outcome is answered or not sent (`ok`, readable or not, cached or not; `http_error`;
+>    `blocked`; `invalid_url`; `render_error`; `error`) and ends the streak of item 2.
+> 2. **Pause.** Per entry of one call: after 2 (`va_tools.turn_data.PAUSE_AFTER`) consecutive unanswered
+>    fetches that were committed (item 4), the entry is paused for 30 s (`PAUSE_S`) of the call clock
+>    (monotonic), counted from that commit. While paused it is not fetched: no request and no cache lookup.
+>    The first refresh at or after the end of the pause fetches it again (the probe). An unanswered probe
+>    pauses the entry again at once (the streak is not reset by a pause) and twice as long, up to 120 s
+>    (`MAX_PAUSE_S`): 30, 60, 120, 120, … Any other outcome ends the streak: the entry is fetched every turn
+>    again and its next pause starts at 30 s.
+> 3. **A paused entry in a turn** is an entry that does not count (Decision P08-T03b item 3): its lines and
+>    the call's values stay, and it holds the names of its last counted fetch against earlier entries. It
+>    adds no wait: the other entries of the turn are fetched as before, and a refresh whose entries are all
+>    paused returns without awaiting anything.
+> 4. **Commit only.** The streak, the pause length and the pause end change in the same synchronous step
+>    that puts the lines in effect and reports the fetches (Decision P08-T03b item 5), never while fetching.
+>    A turn cut before that step, or one whose decision failed, counts nothing, as it reports nothing. So
+>    unanswered fetches of cut turns do not bring the pause nearer, and a `paused` result of a cut turn is not
+>    reported.
+> 5. **Event.** One `call.dynamic_data` per paused entry per turn: outcome `paused`, level `warning`, message
+>    `Dynamic data paused: endpoint not answering`, data `status_code: null`, `duration_ms: 0`,
+>    `variables_set: []`, `cached: false`, `url` as for a timed-out fetch (rendered, without user info, query
+>    or fragment; empty when it does not render), `timing: "every_turn"`. Only per-turn fetches have this
+>    outcome. The start of each pause is logged once (`tools.turn_data_paused`, warning: `index`, `pause_s`,
+>    `unanswered`; never a URL).
+> 6. **Size.** The media worker reads a per-turn answer up to 65 536 bytes
+>    (`va_tools.turn_data.TURN_MAX_ANSWER_BYTES`). A larger one is cut, so by P08-T03a rule 4 it is `ok` and
+>    not readable: it sets nothing, keeps the entry's lines and is not cached. The per-turn fetcher's cache
+>    limit is the same number (`DynamicDataFetcher(max_cached_bytes=)`): it stores a body whose compact JSON
+>    is at most 65 536 bytes, and a stored `dyn:` value longer than that plus 32 bytes (the
+>    `{"status":NNN,"body":}` wrapper is 22) is a miss for it, so the request goes out (the worker's pre-call
+>    fetch may have stored up to 262 144 bytes under the same key). The pre-call phase keeps 1 MiB and
+>    262 144. Why 64 KiB, measured on one thread of the build runner (`orjson.loads` + jsonpath-ng, the
+>    executor's own steps): a 1 MiB document takes 8 ms to parse, 67 ms to search with
+>    `$.data.items[*].plan.tier` and 243 ms with `$..x`; 262 KiB with `$..x` 54 ms; 64 KiB 13.5 ms; 16 KiB
+>    3.5 ms. A frame is 20 ms. What remains: 64 KiB with a recursive-descent path is still about 14 ms on the
+>    loop per entry and turn until answers above a threshold are parsed and searched off the loop (P08-FIX-25,
+>    which also covers tools and Webhook nodes, whose answers stay at 1 MiB).
+> 7. **Limits of the pause.** It lives in memory, per call and per entry: calls do not share it and a new call
+>    starts at zero (its pre-call fetch in the worker has the 5 s / 6 s rule of P08-T03a). It bounds what one
+>    call sends to an endpoint that does not answer; it does not free a resolver thread that a lookup already
+>    started holds, and it does not make the pod's name lookups independent of such endpoints.
+>
+> Code: `va_tools.turn_data.TurnDynamicData` (`refresh` skips paused entries and reports them through
+> `DynamicDataFetcher.unfetched(spec, index, scope, "paused")`; `commit` counts); `DynamicDataFetcher.clock`
+> and `max_cached_bytes=`; `va_media.call_dynamic_data.TurnDataSource.for_call` builds the per-turn executor
+> and fetcher with the 64 KiB limit.
 
 ## 8. Custom code sandbox (`va_tools.sandbox.deno`)
 
