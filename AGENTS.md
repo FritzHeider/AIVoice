@@ -2226,3 +2226,31 @@ Grafana 3001
   **config)` adds call config such as `dynamic_data`). `cycles_through` reports only the SHORTEST cycle per class:
   after breaking one edge re-run and read the `va_*` classes still in the garbage, a second cycle may hide behind
   the first.
+- 2026-11-06 (P08-FIX-25): CPU work on answers goes through `va_tools.offload.off_loop(work)` (the process's
+  ONE reader thread `va-tools-read`, context variables copied, a cancelled wait returns at once and a queued job
+  never runs), never `asyncio.to_thread` in a real-time process: on the default pool N CPU-bound threads take the
+  GIL from the loop (ten 64 KiB `$..x` reads: 216 ms loop gap; one worker: 10 ms). `work` is a
+  `functools.partial` over data, never a bound method of a call part. Whether a read leaves the loop is
+  `va_tools.jsonpath.inline_read(size, paths)`, an ALLOWLIST: `..` in the text → never inline; a direct path
+  in the plain spelling (names/indexes only) never counts; any other path is judged by its compiled tree and
+  stays inline only when it is descending (`$` at the far left, then single names, `*`, single indexes,
+  slices, filters that test/compare a relative path of names and indexes with a literal) while bytes x summed
+  weights ≤ `INLINE_SCAN_BYTES` (2 048; weight 1 + per filter expression 1 + its relative steps); everything
+  else is never inline at any size (`$`/`@` elsewhere, `` `parent` ``/`` `len` ``/named operators, unions,
+  several names or indexes in a step, `=~`, `||`, invalid paths): those shapes multiply (`$[*].$[*]` on 2 KiB:
+  2.3 s; `$['a','a']` x 20 on 121 bytes: 6.4 s). A new jsonpath-ng node type is never inline until
+  `_scan_weight` names it. `$['*']` is a wildcard in jsonpath-ng; `|` and a single `&` raise a
+  DeprecationWarning at parse (an error under pytest: mark such a test with `filterwarnings`). Used by
+  `HttpExecutor._finish` (now async; `tools.http_request` logs `offloaded`) and
+  the dynamic data cache hit (specs/13 §9 Decision P08-FIX-25). Tests (`tools_helpers`): `thread_recorder(
+  monkeypatch, module, name)` records the thread a module function ran on (assert the thread, never a loop-lag
+  number: a collector pass in the thread makes those flaky under pytest), `held_reader()` occupies the reader for
+  a block (10 s cap; the only way a test may hold it: the reader is process-wide, a test must leave it idle),
+  `read_waits(monkeypatch, module)` = event set when the module's `off_loop` is entered (then the task waits for
+  the thread). `HttpExecutor` gives a read on the reader the request's `timeout_ms` on ITS clock (outcome
+  `timeout`, no status/body, not re-sent; tools and Webhook nodes have no other deadline around a request), so
+  an executor on a `FrozenClock`/`RecordingClock` (`plain_executor`) times every off-loop read out at once, or
+  races it: tests whose answer may leave the loop use `tools_helpers.manual_executor()` / `manual_fetcher()`
+  (ManualClock: the deadline passes only on `run_for`). The same holds for the sims' `AcceleratedClock`
+  (virtual time runs ahead while the reader works): keep sim-test answers small with direct paths. Evaluation
+  work on the reader is still unbounded (task `fix:jsonpath-work-bound`, incl. the multiplying shapes).

@@ -15,13 +15,24 @@
   timeouts and 5xx with a ``0.25 s * attempt`` backoff on the injected clock; never on 4xx.
 * The body is read up to 1 MiB (``truncated`` beyond), parsed as JSON when it parses, else kept as text; the
   ``extract`` JSONPath pairs apply to JSON bodies only.
+* The body is parsed and searched on the event loop only when its paths are cheap for its size
+  (:func:`va_tools.jsonpath.inline_read`); otherwise on the process's reader thread
+  (:func:`va_tools.offload.off_loop`). The outcome is the same either way. A request cancelled while its
+  read waits for the thread or runs there returns at once (specs/13 §9 Decision P08-FIX-25).
+* A read on the reader thread gets ``timeout_ms`` on the injected clock, waiting for the thread included.
+  When it has not finished by then the outcome is ``timeout`` with no status, body or extracted value (the
+  answer is not used at all), and the request is not sent again: it was answered, so the retries do not
+  apply. A read still queued at that moment never runs.
 
-Logs (``tools.http_request``) carry the method, host, status, outcome, attempts and duration, never the path,
-query, headers or bodies.
+Logs (``tools.http_request``) carry the method, host, status, outcome, attempts, duration (the read
+included) and ``offloaded`` (whether the read left the loop), never the path, query, headers or bodies. A
+read that ran out of time is the one line with ``outcome="timeout"`` and ``offloaded=true``.
 """
 
 from __future__ import annotations
 
+import asyncio
+import functools
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -38,8 +49,10 @@ from va_common.net import HostResolver, UnsafeDestinationError, system_resolver
 from va_common.safe_http import safe_client
 from va_common.settings import WebhookSafetySettings
 from va_common.time import Clock
+from va_common.waits import within
 from va_engine.ports import HttpCall, HttpOutcome, HttpOutcomeKind
-from va_tools.jsonpath import extract_all
+from va_tools.jsonpath import extract_all, inline_read
+from va_tools.offload import off_loop
 
 __all__ = [
     "BACKOFF_S",
@@ -107,6 +120,14 @@ def _parsed(raw: bytes) -> JsonValue:
     return value
 
 
+def _read(raw: bytes, extract: tuple[tuple[str, str], ...]) -> tuple[JsonValue, Mapping[str, JsonValue]]:
+    """The parsed body of ``raw`` and what ``extract`` selects in it (JSON bodies only). Data in, data
+    out: it runs on the loop or on the reader thread."""
+    body = _parsed(raw)
+    json_body = body if not isinstance(body, str) else None
+    return body, (extract_all(json_body, extract) if json_body is not None else {})
+
+
 async def _read_capped(response: httpx.Response, max_bytes: int) -> tuple[bytes, bool]:
     chunks: list[bytes] = []
     size = 0
@@ -146,7 +167,7 @@ class HttpExecutor:
         url = call.url.strip()
         refused = _preflight(url, allow_http=self._allow_http)
         if refused is not None:
-            return self._finish(call, url, _Attempt(refused), attempts=0, started=started)
+            return await self._finish(call, url, _Attempt(refused), attempts=0, started=started)
         content = None if call.body is None or call.method == "GET" else dumps(call.body)
         headers = self._headers(call, content)
         timeout = httpx.Timeout(
@@ -157,7 +178,7 @@ class HttpExecutor:
             attempts += 1
             attempt = await self._attempt(call, url, headers, content, timeout)
             if not attempt.retryable or attempts > call.retries:
-                return self._finish(call, url, attempt, attempts=attempts, started=started)
+                return await self._finish(call, url, attempt, attempts=attempts, started=started)
             await self._clock.sleep(BACKOFF_S * attempts)
 
     def _headers(self, call: HttpCall, content: bytes | None) -> httpx.Headers:
@@ -196,18 +217,26 @@ class HttpExecutor:
         kind: HttpOutcomeKind = "ok" if status in _SUCCESS else "http_error"
         return _Attempt(kind, status, raw, truncated)
 
-    def _finish(
+    async def _finish(
         self, call: HttpCall, url: str, attempt: _Attempt, *, attempts: int, started: float
     ) -> HttpOutcome:
-        duration_ms = max(round((self._clock.monotonic() - started) * 1000), 0)
         body: JsonValue = None
         extracted: Mapping[str, JsonValue] = {}
-        if attempt.status is not None:
-            body = _parsed(attempt.raw) if attempt.raw else None
-            json_body = body if not isinstance(body, str) else None
-            extracted = extract_all(json_body, call.extract) if json_body is not None else {}
+        offloaded = False
+        if attempt.status is not None and attempt.raw:
+            work = functools.partial(_read, attempt.raw, call.extract)
+            offloaded = not inline_read(len(attempt.raw), (path for _, path in call.extract))
+            if not offloaded:
+                body, extracted = work()
+            else:
+                reading = asyncio.ensure_future(off_loop(work))
+                if await within(reading, self._clock, call.timeout_ms / 1000):
+                    body, extracted = reading.result()
+                else:
+                    attempt = _Attempt("timeout")
         if call.extract and not extracted:
             extracted = dict.fromkeys((name for name, _ in call.extract), None)
+        duration_ms = max(round((self._clock.monotonic() - started) * 1000), 0)
         _log.info(
             "tools.http_request",
             method=call.method,
@@ -217,6 +246,7 @@ class HttpExecutor:
             attempts=attempts,
             duration_ms=duration_ms,
             truncated=attempt.truncated,
+            offloaded=offloaded,
         )
         return HttpOutcome(
             kind=attempt.kind,

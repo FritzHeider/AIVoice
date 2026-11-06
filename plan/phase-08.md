@@ -78,21 +78,31 @@
     still pass; `make check` and `make e2e` pass (capacity flow included). On approval append
     `2026-11-06-p08-t03b-fourth-pass.md` to `.ralph/review-inbox/DONE` (items 1, 3, 4 fixed by 6d80843,
     item 2 by P08-FIX-23, item 5 here).
-- [ ] P08-FIX-25 Large HTTP answers are parsed and JSONPath-searched off the event loop (tools, Webhook nodes, dynamic data) — Planner measurement 2026-11-06 (`logs/probe_plan_fix23_parse.py`, one thread: 1 MiB answer with `$..x` 246 ms, `$.data.items[*].plan.tier` 69 ms, parse alone 9 ms; 262 KiB 54 ms; 64 KiB 13.5 ms; 16 KiB 3.6 ms); raised as low confidence in .ralph/review-inbox/2026-11-06-p08-t03b-third-pass.md item 5
+- [x] P08-FIX-25 Large HTTP answers are parsed and JSONPath-searched off the event loop (tools, Webhook nodes, dynamic data) — `va_tools.offload.off_loop` (ONE reader thread `va-tools-read`, context copied, cancel returns at once, a queued job never runs); `va_tools.jsonpath.inline_read` is an ALLOWLIST decided from the compiled tree (`..` never inline; direct paths never count; a descending path weighs 1 + per filter expression 1 + its relative steps, inline while bytes x summed weights <= 2 048; root re-entry, `parent`, unions, multi-name/index steps, `=~`, `||`, named operators, invalid paths never inline); `HttpExecutor` gives an off-loop read the request's `timeout_ms` on its clock (outcome `timeout`, not re-sent, a queued read never runs); the dynamic data cache hit reads under the same rule; Decision P08-FIX-25 (specs/13 §9, pointer in §7 P08-T03a rule 2), AGENTS.md. Two review passes (first rejected: the rule was a `..` blacklist and the docs claimed a bound that did not exist). Reviewer, second pass: `scripts/ralph/gates.sh --verify --e2e` exit 0 on tree b1dd1c24 (lint/typecheck/placeholders/openapi/specs pass, make test 13472 passed 7 skipped, coverage 99.09 %, make e2e 20 passed on one `--only e2e` retry of the same tree; the first e2e run failed only the capacity flow with 2 underruns from one ~80 ms loop stall at opener time, known runner flake `fix:e2e-cold-start-flakes`, the flow runs no tool or dynamic data); 17 mutations of the rule, the reader and the read deadline all killed by the 221 targeted tests and the tree restored byte for byte (`/var/tmp/review2_mut/run.py`); reviewer probes: 21 adversarial descending shapes at the threshold cost <= 1.4 ms on the loop (`logs/probe_review2_fix25_rule.py`), 58 non-descending/invalid shapes are never inline (`logs/probe_review2_fix25_never.py`), concurrent parsing from 4 threads gives the single-thread trees (`logs/probe_review2_fix25_threads.py`); jscpd 0 clones, radon 2.95, audits clean. Open follow-up: runtime task `fix:jsonpath-work-bound` (work on the reader is unbounded, incl. the multiplying shapes). Planner measurement 2026-11-06 (`logs/probe_plan_fix23_parse.py`, one thread: 1 MiB answer with `$..x` 246 ms, `$.data.items[*].plan.tier` 69 ms, parse alone 9 ms; 262 KiB 54 ms; 64 KiB 13.5 ms; 16 KiB 3.6 ms); raised as low confidence in .ralph/review-inbox/2026-11-06-p08-t03b-third-pass.md item 5
   - Spec refs: specs/13-tools-and-dynamic-data.md §9 (Decision 2026-11-03: the shared HTTP executor), §5 steps 4-6, §7 (Decision P08-T03a rule 2); MASTER_PROMPT §4 rule 7; specs/07-media-pipeline.md §9 (Decision P08-FIX-3)
   - Depends on: P08-FIX-23
-  - Deliverables: `va_tools.http.HttpExecutor` parses the body and applies the `extract` JSONPaths in a worker
-    thread (`asyncio.to_thread`) when the raw body is larger than an inline threshold (decide it from a
-    measurement on this runner, about 8 KiB; small answers stay inline), and
-    `DynamicDataFetcher`'s cache-hit path does the same for a stored value above the threshold; a cancelled
-    request does not wait for the thread; specs/13 §9 Decision `P08-FIX-25` with the measured numbers;
-    AGENTS.md.
-  - Acceptance: tests: a body above the threshold is parsed and searched off the loop thread (the test
-    records the thread of `orjson.loads`/`extract_all` through a seam, or a loop-lag probe task ticking every
-    millisecond sees no gap above 10 ms while a 1 MiB `$..x` answer is handled) and gives the same outcome as
-    the inline path (parametrized twins for ok / text / truncated / extraction miss); a body at or below the
-    threshold never leaves the loop thread; a cache hit above the threshold likewise; `make check` and
-    `make e2e` pass.
+  - Deliverables (amended by the Planner 2026-11-06 after measuring on this runner, DEC-022; probes
+    `logs/probe_plan_fix25*.py`): `va_tools.offload.off_loop(work)` runs CPU work on the process's ONE reader
+    thread (`va-tools-read`; not `asyncio.to_thread`: 10 answers of 64 KiB with `$..x` on the default pool
+    left the loop a 216 ms gap, on one worker 10 ms), carrying the caller's context variables;
+    `va_tools.jsonpath.inline_read(size, paths)` decides per answer: a path with a `..` step is never read
+    on the loop (a 4 KiB answer nested 680 deep costs 650 ms with `$..*..x`), a path of names and indexes
+    only (`$.a.b[0]`) costs nothing size-dependent, any other path is judged by its compiled tree (amended
+    by the Reviewer after the first review: an allowlist; only a descending path counts the answer's bytes
+    times its weight, every other shape is never read on the loop), and the answer is read on the loop
+    when bytes x summed weights <= 2 048 (about 1 ms); an off-loop read is bounded by the request's
+    `timeout_ms`; `va_tools.http.HttpExecutor`
+    parses + extracts through that rule, and so does `DynamicDataFetcher`'s cache-hit path (stored value
+    parse + extraction); a cancelled request does not wait for the thread and a job still queued never
+    runs; `tools.http_request` logs `offloaded`; specs/13 §9 Decision `P08-FIX-25` with the measured
+    numbers; AGENTS.md.
+  - Acceptance: tests: an answer the rule sends off the loop is parsed and searched on the reader thread
+    (the test records the thread of `_parsed`/`extract_all` through the module attribute) and gives the
+    same outcome as the inline read (parametrized twins for ok / text / truncated / extraction miss / empty
+    body / JSON error body); an answer the rule keeps (direct paths at 1 MiB, a counting path at the
+    threshold, no paths) never leaves the loop thread; a cache hit likewise, both ways; a request cancelled
+    while its read is held returns at once and a queued read never runs; a dynamic data fetch whose read is
+    held is reported `timeout` at its budget; `make check` and `make e2e` pass.
 - [x] P08-FIX-22 "The run goes on after a cut round" is a property of the system tool (`SystemTool.detaches`), not of being a system tool — see .ralph/review-inbox/2026-11-05-p08-fix-21-wip-review.md (no blockers; item 1 fixed here, items 2 and 3 closed with a written reason below) — `va_tools.executor.SystemTool.detaches` (protocol member, no default), `CallToolExecutor._run_system` runs a non-detaching tool in the waiting task (never pending, never detached, reads `interrupted`), `ToolSms`/`CallbackScheduler` `detaches: Final = True`, 6 new test cases (3 parametrized twins, cancelled-with-its-wait, TaskBrain barge-in `interrupted`, media class check), Decision P08-FIX-22 (specs/13 §6, pointers in Decisions P08-FIX-13 item 2 and P08-FIX-21 item 1); reviewer re-run: lint/typecheck/placeholders pass, check_spec_refs 0, jscpd 0 clones, radon avg 2.93, pip-audit clean, pnpm audit high exit 0, make test 13092 passed 7 skipped (cov 99.08%, va_tools/executor 99%), make e2e 20 passed (capacity flow 0 underruns; the builder's first run on the cold stack had 11 underruns from one ~65 ms media loop stall, runtime task fix:capacity-start-burst-stall, the flow runs no system tool); reviewer mutation checks on a shadow copy: always shield → the 2 non-detaching tests fail, never shield → 6 fail, `ToolSms.detaches = False` → the media test fails
   - Spec refs: specs/13 §6 (Decisions P08-FIX-13 item 2, P08-FIX-21), specs/13 §4 (Decision P08-FIX-20)
   - Depends on: P08-FIX-21

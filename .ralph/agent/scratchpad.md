@@ -2218,3 +2218,541 @@ Inbox: no note newer than the fourth-pass one.
 - Inbox: `2026-11-06-p08-t03b-fourth-pass.md` appended to DONE (items 1, 3, 4 by 6d80843, item 2 by 27f3f82,
   item 5 here). No undone note left. Runtime task fix:pathway-call-cycles closed. Next for the Planner:
   P08-FIX-25, then P08-T03c.
+
+## Planner 2026-11-06T05:25Z: after P08-FIX-24 (commit 2435514)
+
+Inbox: every note is in DONE. Tree clean at HEAD. First unticked task: P08-FIX-25. Measured before planning
+(probes kept: `logs/probe_plan_fix25.py`, `_gc.py`, `_pool.py`, `_paths.py`, `_inline.py`, `_offloop.py`; run
+with `uv run python <probe>`; this runner, 8 vCPU, Python 3.12, switch interval 5 ms). The plan entry's
+"`asyncio.to_thread` above about 8 KiB" does not survive the numbers, so I amended the entry's Deliverables
+and Acceptance in plan/phase-08.md and recorded DEC-022:
+
+| What | Result |
+|---|---|
+| inline read, `$..x`: 64 KiB / 262 KiB / 1 MiB | 13.6 / 54 / 214-240 ms on the loop (parse alone 0.35 / 1.5 / 8.7 ms) |
+| one read in a thread, 1 MiB `$..x`, media collector `(10_000, 5, 50)` + freeze, uvloop | loop gap 10-11 ms (233 ms inline) |
+| same with default collector thresholds | a generation-2 pass of 25-35 ms in the thread holds the GIL → a lag-probe unit test would flake; use the thread seam |
+| collector off | gap ≤ 7 ms (the 5 ms GIL switch interval) |
+| 10 x 64 KiB at once: default pool / two workers / ONE worker | gap 216 / 133 / 10 ms |
+| 10 x 262 KiB at once: default pool / two / ONE | 475 / 108 / 15 ms |
+| 4 KiB answer nested 680 deep: `$..x` / `$..*..x` / `$..a..x` | 1.1 / 654 / 695 ms (two `..` steps are quadratic in depth) |
+| paths without `..`, worst shape (filter over an array of scalars) | 1.3 ms at 2.6 KiB, 2.7 ms at 5.7 KiB, 10.7 ms at 26 KiB (≈ 0.5 ms/KiB) |
+| direct path `$.data.plan` | 3-4 µs at any size up to 1 MiB |
+| reader round trip on an idle loop | 43-58 µs |
+| first compile of a path (then LRU) | 0.3-1.1 ms |
+| cancel while the reader is held (prototype) | awaiting task raises `CancelledError` in 0.07 ms, queued job never runs, context variables reach the thread, asyncio and uvloop |
+| 8 threads compiling 600 distinct paths | no error, results equal to serial |
+| neighbours on the same path, per MiB | cache `json.loads` 9.6 ms; store `_compact` x2 22 ms; `_unstorable` + `_compact` of a whole-document value 36 + 11 ms; runner `dumps_str`/`excerpt` 1.3 ms each |
+
+Consequences: (1) one reader thread, never the default pool; (2) the inline rule must look at the paths (a
+`..` path is never safe on the loop at any size; a direct path is free at any size); (3) `orjson.loads` holds
+the GIL wherever it runs, so parse-only reads stay on the loop (8.7 ms per MiB is the floor either way);
+(4) a runaway path now occupies the reader instead of the loop: follow-up runtime task
+`fix:jsonpath-work-bound` (not this task).
+
+## Plan P08-FIX-25 (answers are read off the loop when their paths can be expensive)
+
+Scope: `packages/va_tools` only (+ specs/13, AGENTS.md). No DB, event, OpenAPI or wire change; one new log
+field. Do not widen: `_variables`/`_store` of dynamic data and the runner's excerpts stay on the loop (numbers
+above; in the media worker per-turn answers are ≤ 64 KiB, so ≤ 3 ms; pre-call fetches of outbound calls run in
+the worker process), `va_pathways.recording.mocked_outcome` stays as is (api/worker text runs, mock bodies).
+
+### 1. `packages/va_tools/src/va_tools/offload.py` (new)
+
+```python
+READER_THREAD: Final = "va-tools-read"          # thread name prefix (the thread is "va-tools-read_0")
+_READER: Final = ThreadPoolExecutor(max_workers=1, thread_name_prefix=READER_THREAD)
+
+async def off_loop[T](work: Callable[[], T]) -> T:
+    """Run ``work`` on the process's one reader thread and return its result (its exception propagates)."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_READER, contextvars.copy_context().run, work)
+```
+- Module docstring = the rules: ONE thread per process (a second CPU-bound thread only takes the GIL from the
+  first and from the loop; cite the measured gaps), FIFO, shared by every executor of the process; the caller's
+  context variables are copied (logs from the thread keep `call_id`/`org_id`); cancelling the await returns at
+  once, a job not started yet never runs, a running one finishes and its result is dropped; the wait is not
+  bounded here (callers' budgets apply); `work` must be a module function over data (`functools.partial`),
+  never a bound method of a per-call object (specs/07 §9 rule); creating the executor at import starts no
+  thread (the first job does).
+- `__all__ = ["READER_THREAD", "off_loop"]`. No lazy init, no lock, no shutdown hook (the interpreter joins
+  the idle worker at exit).
+
+### 2. `packages/va_tools/src/va_tools/jsonpath.py`
+
+```python
+INLINE_SCAN_BYTES: Final = 2_048
+_DIRECT: Final = re.compile(r"""\$(?:\.[A-Za-z_][A-Za-z0-9_]*|\[\d+\]|\['[^'\[\]\\*]*'\]|\["[^"\[\]\\*]*"\])*""")
+
+def inline_read(size: int, paths: Iterable[str]) -> bool:
+    """Whether an answer of ``size`` bytes searched with ``paths`` may be read on the event loop."""
+    counting = 0
+    for path in paths:
+        text = path.strip()
+        if ".." in text:
+            return False
+        if _DIRECT.fullmatch(text) is None:
+            counting += 1
+    return size * counting <= INLINE_SCAN_BYTES
+```
+- Docstring/module docstring: the three classes with their measured cost; `..` is a textual
+  over-approximation (a quoted name holding `..` only costs a thread hop); the pattern excludes `*` inside
+  quotes because jsonpath-ng reads `$['*']` as a wildcard (verified: `extract({"*": 1, "a": 2}, "$['*']")`
+  is `[1, 2]`); no paths → always inline (parsing holds the GIL in any thread).
+- Export `INLINE_SCAN_BYTES`, `inline_read`.
+
+### 3. `packages/va_tools/src/va_tools/http.py`
+
+- Module function (data only, runs on either thread):
+  ```python
+  def _read(raw: bytes, extract: tuple[tuple[str, str], ...]) -> tuple[JsonValue, Mapping[str, JsonValue]]:
+      body = _parsed(raw)
+      json_body = body if not isinstance(body, str) else None
+      return body, (extract_all(json_body, extract) if json_body is not None else {})
+  ```
+- `_finish` becomes `async` (both `execute` return sites `return await self._finish(...)`):
+  ```python
+  body, extracted, offloaded = None, {}, False
+  if attempt.status is not None and attempt.raw:
+      work = functools.partial(_read, attempt.raw, call.extract)
+      offloaded = not inline_read(len(attempt.raw), (path for _, path in call.extract))
+      body, extracted = await off_loop(work) if offloaded else work()
+  if call.extract and not extracted: extracted = dict.fromkeys(...)      # unchanged
+  duration_ms = ...                                                      # now taken AFTER the read
+  _log.info("tools.http_request", ..., offloaded=offloaded)
+  ```
+  Outcomes are unchanged in every field; only `duration_ms` now includes the read (same value under the test
+  clocks). Module docstring: one bullet for the read rule (pointer to `va_tools.jsonpath.inline_read` and
+  `va_tools.offload`), and `offloaded` in the log sentence.
+
+### 4. `packages/va_tools/src/va_tools/dynamic_data.py` (cache hit)
+
+- Module function `_cached_read(raw: str | bytes | bytearray, extract) -> tuple[int, Mapping[str, JsonValue]] | None`:
+  `_cached_answer(raw)` then `extract_all(body, extract)`; `None` when the value is no answer.
+- `_lookup(self, redis, key, index, extract)` returns `tuple[int, Mapping[str, JsonValue]] | None`: after the
+  existing `None`/oversize checks, `work = functools.partial(_cached_read, raw, extract)`; run it inline when
+  `inline_read(_stored_bytes(raw), paths)` else `await off_loop(work)`; `None` → the existing
+  `tools.dynamic_data_cache_invalid` warning. `_fetch` takes `status, extracted = hit` (the body is not needed
+  after the extraction). Everything else (`_variables`, `_sections`, `_store`) unchanged.
+- Module docstring rule 2: one sentence (a stored value is parsed and searched under the same read rule as a
+  fetched answer).
+
+### 5. Tests
+
+`packages/va_tools/tests/support/tools_helpers.py`:
+- `held_reader()` async context manager: starts `off_loop(job)` as a task where `job` sets a loop event via
+  `loop.call_soon_threadsafe` and then waits on a `threading.Event` with a 10 s cap (a failed test can never
+  wedge the process-wide reader for good); yields once the job runs; on exit sets the gate and awaits the
+  task. `thread_recorder(monkeypatch, module, name)` → list of thread names: wraps the module attribute
+  (`va_tools.http.extract_all`, `va_tools.http._parsed`, `va_tools.dynamic_data.extract_all`) with a function
+  that appends `threading.current_thread().name` and delegates.
+- Every test that holds the reader releases it in the context manager; a test ends with the reader idle.
+
+`packages/va_tools/tests/test_offload.py` (new):
+- `test_work_runs_on_the_one_reader_thread_in_order`: 5 jobs → all thread names equal, start with
+  `READER_THREAD`, differ from the loop thread, results in submit order, never two inside at once (a counter
+  the jobs bump/drop).
+- `test_the_caller_s_context_variables_reach_the_thread` (a `ContextVar` set before the call; plus a structlog
+  bound field in a line logged from the job via `json_log_stream`/`log_events`).
+- `test_an_exception_of_the_work_propagates`.
+- `test_a_cancelled_wait_returns_while_the_thread_is_still_held`: inside `held_reader()`: a second job's task
+  is cancelled → `CancelledError` at once, the gate still closed.
+- `test_a_job_cancelled_while_queued_never_runs`: cancelled queued job, release, a marker job after it runs,
+  the cancelled one did not.
+
+`packages/va_tools/tests/test_jsonpath.py` (add):
+- `test_inline_read_rule` parametrized table: no paths at 1 MiB → True; direct paths (`$`, `$.a.b[0]`,
+  `$['a b']`, `$["x-y"][2]`, padded with spaces) at 1 MiB → True; `$..x`/`$.a[?(@..b)]` at 1 byte → False;
+  one counting path (`$.a[*]`, `$.*`, `$['*']`, `$.a[?(@.x > 1)]`, `$.a[0:2]`, `$.a[-1]`, an invalid path) at
+  2 048 → True and at 2 049 → False; two counting paths at 1 024 → True, at 1 025 → False; direct paths never
+  add to the count.
+- `test_every_direct_path_compiles_to_names_and_indexes_only`: hypothesis strategy building paths from the
+  pattern's alternatives → `compile_path` gives a tree of `Root`/`Child`/`Fields` (one name, not `*`)/`Index`
+  only (imports the jsonpath-ng node classes; this is what keeps the pattern honest against the library).
+
+`packages/va_tools/tests/test_http_read.py` (new; respx + `plain_executor`):
+- `test_the_read_gives_the_same_outcome_on_the_loop_and_on_the_reader` parametrized over mode (`monkeypatch.
+  setattr(va_tools.http, "inline_read", lambda size, paths: mode)`) x case: JSON ok with extraction, text body,
+  truncated body (`max_bytes`), extraction miss (all names `None`), empty body (204; never offloaded even when
+  the rule says so), JSON error body (500 with extraction). Asserts `(kind, status, body, truncated,
+  extracted)` equal the expected value AND the recorded thread of `extract_all`/`_parsed` matches the mode.
+- Real rule, no patch: `test_a_descendant_path_is_read_on_the_reader_whatever_the_size` (tiny body, `$..x`);
+  `test_a_counting_path_above_the_threshold_is_read_on_the_reader` and `..._at_the_threshold_stays_on_the_loop`
+  (bodies of exactly 2 049 / 2 048 bytes built by padding a string member); `test_direct_paths_stay_on_the_
+  loop_at_the_size_cap` (≈ 1 MiB body, `$.data.plan`); `test_an_answer_without_paths_stays_on_the_loop`.
+- `test_a_request_cancelled_while_its_read_is_held_does_not_wait`: inside `held_reader()`, `execute` of a
+  `$..x` call as a task, wait until the response was served (respx route called), cancel → `CancelledError`
+  while the gate is closed; after release a marker read works.
+- `test_the_log_says_whether_the_read_left_the_loop` (`offloaded` true/false; adjust the existing
+  `test_logs_carry_host_but_no_path_query_headers_or_bodies` only if it pins the key set).
+- `test_a_log_line_from_the_reader_keeps_the_call_context`: an invalid `..`-containing path (`$..[`) with a
+  bound `call_id` → `tools.jsonpath_invalid` carries it.
+
+`packages/va_tools/tests/test_dynamic_data.py` (add; fakeredis fixture already there):
+- `test_a_cached_answer_is_read_under_the_same_rule` parametrized: stored answer + `$..plan` → `extract_all`
+  ran on the reader; stored answer + `$.plan` → on the loop; both give `cached`, the same variables and lines
+  as the uncached fetch.
+- `test_a_stored_value_that_is_no_answer_is_a_miss_on_the_reader_too` (`..` path, stored `"[]"`/text → request
+  sent, `tools.dynamic_data_cache_invalid`).
+- `test_a_fetch_whose_read_is_held_is_a_timeout_at_the_budget`: `manual_fetcher()` + `held_reader()`, a `$..x`
+  entry answered by respx; `clock.wait_for_sleep(budget)` + `run_for(budget)` → `fetch_all` returns `timeout`
+  for it while the gate is still closed (the turn does not wait for the thread).
+
+Prove the guards (scratchpad, real output; restore byte for byte): (a) `off_loop` → `return work()` → the
+reader-thread tests fail; (b) `inline_read` → `return True` → rule tests + reader tests fail; (c)
+`max_workers=2` → the "never two at once"/held-reader queue tests fail.
+
+Still green (targeted): `uv run pytest packages/va_tools packages/va_engine packages/va_pathways
+apps/media_worker/tests/test_runtime_tools_sim.py apps/media_worker/tests/test_runtime_dynamic_data_sim.py
+apps/media_worker/tests/test_runtime_pathway_sim.py apps/api/tests/test_tools_api.py --no-cov -n 8` (list the
+real file names; the GC guards of the runtime sims must still pass: the job is a `partial` over bytes and
+tuples, no call part).
+
+### 6. Docs (same commit)
+
+- specs/13-tools-and-dynamic-data.md §9: `> Decision (2026-11-06) P08-FIX-25:` after the 2026-11-03 block:
+  the rule (three path classes, `INLINE_SCAN_BYTES`), the one reader thread and why not the default pool, what
+  a cancel does, what is NOT bounded (the wait; evaluation work → `fix:jsonpath-work-bound` named as open),
+  the cache-hit path, what stays on the loop with its numbers, and the measurement table above (state the
+  runner and that gate numbers come from the probes, not from a unit test).
+- §7 Decision P08-T03a rule 2 gets one pointer sentence to that Decision (write `specs/13 §9` on one line).
+- AGENTS.md "Learned during the build": `- 2026-11-06 (P08-FIX-25): ...` (use `va_tools.offload.off_loop`
+  for CPU work on answers, never `asyncio.to_thread` in a real-time process: the default pool lets N threads
+  take the GIL from the loop; the inline rule and its constants; test helpers `held_reader()` /
+  `thread_recorder`; a test must leave the reader idle; the collector makes loop-lag asserts flaky under
+  pytest, record the thread instead; `$['*']` is a wildcard in jsonpath-ng).
+
+### 7. Gates (PATH needs /home/ralph/.local/bin)
+
+`make fmt`, then ONE `scripts/ralph/gates.sh --e2e > logs/gates_fix25.log 2>&1` in the background with a
+heartbeat (Monitor re-armed every 10 min; ~27 min), then `scripts/ralph/gates.sh --verify --e2e` → exit 0,
+paste its table. Beside it: `npx --yes jscpd@4 --silent --output /var/tmp/jscpd_fix25` (0 clones; the twin
+cases are one parametrized test, the thread tests share `thread_recorder`), `uvx radon cc -s -a apps packages
+scripts`, `uvx pip-audit` on `uv export`, `corepack pnpm audit --audit-level high`. Nothing may write into
+the tree during the stamp run. `build.done` as plain text: `tests: pass, lint: pass, typecheck: pass, audit:
+pass, coverage: pass, duplication: pass, complexity: N.NN,`.
+
+### 8. For the Reviewer (on approval)
+
+`scripts/ralph/gates.sh --verify --e2e`; exit 0 → re-run nothing. Mutations (a)-(c) above. Tick P08-FIX-25
+(no inbox note to add: third-pass is already in DONE), commit by path incl. the new files (`fix(tools): large
+answers are parsed and searched off the event loop`, footer `Task: P08-FIX-25`). Next for the Planner:
+P08-T03c.
+
+### 9. Risks
+
+- mypy: `off_loop[T]` (PEP 695) and `run_in_executor(executor, ctx.run, work)` typing; if `ctx.run` does not
+  type through, wrap in a typed inner function (no `Any` leak, no ignore without a reason).
+- The reader is process-global: a test that leaves it held blocks every later offloaded read of that xdist
+  worker. Only hold it through `held_reader()` (10 s cap) and never from a fixture that outlives the test.
+- Tests on the simulators' `AcceleratedClock` treat a wait on the reader like real I/O (virtual time may run
+  ahead while a read is in the thread). Today's suites read small answers with direct paths (inline), so no
+  change is expected; if one moves, fix the test's path/size, not the rule.
+- Coverage: the offloaded lines run in a non-main thread; coverage.py traces threads by default, but if a line
+  shows uncovered check `[tool.coverage.run]` before adding tests.
+- Known e2e runner flakes (`fix:e2e-cold-start-flakes`): same handling as before (confirm from the logs, one
+  `gates.sh --only e2e` retry on the same tree, never touch thresholds; a second failure → `build.blocked`).
+- Not in this task: a bound on JSONPath evaluation work (`fix:jsonpath-work-bound`), `fix:resolver-pool`.
+
+## Build P08-FIX-25 (Builder, 2026-11-06T04:45Z-)
+
+Built exactly the plan, in `packages/va_tools` (+ specs/13, AGENTS.md). No DB, event, OpenAPI or wire change.
+
+- `va_tools/offload.py` (new): `READER_THREAD`, `off_loop(work)` over ONE `ThreadPoolExecutor(max_workers=1)`,
+  context copied (`contextvars.copy_context().run`); mypy takes the PEP 695 signature as is.
+- `va_tools/jsonpath.py`: `INLINE_SCAN_BYTES` 2 048, `_DIRECT` (ASCII), `inline_read(size, paths)`.
+- `va_tools/http.py`: module `_read(raw, extract)`, `_finish` is async, read inline or `off_loop` by the rule,
+  only for a response with a non-empty body; `duration_ms` after the read; log field `offloaded`.
+- `va_tools/dynamic_data.py`: module `_cached_read(raw, extract)`; `_lookup(redis, key, index, extract)` returns
+  `(status, extracted)` and reads the stored value inline or on the reader by the same rule (stored size).
+- Test helpers (`tools_helpers`): `held_reader()` (10 s cap), `thread_recorder(monkeypatch, module, name)`,
+  and one more than planned: `read_waits(monkeypatch, module)` = event set when the module's `off_loop` is
+  entered. Needed so the cancel test and the budget test wait for "the task is waiting for the thread" by an
+  event, not by polling.
+- Tests: `test_offload.py` (5), `test_jsonpath.py` (+29 incl. the hypothesis tree check; held at 2 000
+  examples in a side run), `test_http_read.py` (30), `test_dynamic_data.py` (+6).
+- Deviation from the plan's test list, both on purpose: (1) with no paths the executor still calls
+  `extract_all` with an empty tuple (as before the change), so the "no paths" tests assert parse + search on
+  the loop, not "search never called"; (2) the twin table has two more cases (`json-null`, `no-paths`).
+- Docs: specs/13 §9 `Decision (2026-11-06) P08-FIX-25` (rule, reader, cancel, what is not bounded, where it
+  applies, what stays on the loop, the Planner's table); §7 Decision P08-T03a rule 2 pointer; AGENTS.md.
+
+Guards proven (files copied to /var/tmp/fix25_mut, mutated in place, restored, `cmp` equal; the four test
+files, 159 tests):
+
+| Mutation | Result |
+|---|---|
+| (a) `off_loop` → `return work()` | 19 failed (reader-thread twins, rule tests above the threshold, cached descendant, the three offload thread tests, both held-reader tests) |
+| (b) `inline_read` → always True | 32 failed (rule table, descendant/above-threshold reads, cached descendant, cancel, budget, `offloaded` log) |
+| (c) `max_workers=2` | 4 failed (one-thread-in-order, queued-never-runs, cancelled request, held read at the budget) |
+| restored | 159 passed |
+
+Targeted run (final sources): va_tools + va_engine + va_pathways + media `test_call_dynamic_data`,
+`test_call_tools`, `test_runtime_{dynamic_data,pathway,tools}_sim` + api `test_tools_api`, `test_tools_test_api`,
+`test_pathway_chat_api` + workflows `test_prefetch_*`: 1803 passed in 81 s (the runtime sim GC guards included).
+
+### Gates P08-FIX-25 (real output, final tree e59e7b3ec03d04f18a94f6893b1e062bacaf095d; 2026-11-06T04:57Z-05:27Z)
+
+`make fmt` exit 0 (nothing changed), then ONE `scripts/ralph/gates.sh --e2e` (exit 0, first run), then
+`scripts/ralph/gates.sh --verify --e2e` → exit 0:
+
+```
+lint          pass      7s  apps/dashboard lint: Done
+typecheck     pass      3s  apps/dashboard typecheck: Done
+placeholders  pass      5s  0 finding(s)
+openapi       pass      5s  check_openapi_drift: openapi/internal.json is current
+specs         pass      0s  check_spec_refs: 0 problem(s)
+test          pass    959s  ================= 13410 passed, 7 skipped in 950.85s (0:15:50) =================
+e2e           pass    604s  ================ 20 passed, 107 deselected in 420.03s (0:07:00) ================
+verified: every listed gate passed on tree e59e7b3ec03d04f18a94f6893b1e062bacaf095d
+```
+
+Coverage 99.08 % total; `va_tools/offload.py`, `jsonpath.py`, `http.py` 100 %; `dynamic_data.py` 99 % (the one
+uncovered line, `_cached_answer`'s non-text return, is the same line as at HEAD: 262 there, 266 now).
+Beside the stamp (outputs outside the tree): jscpd 0 clones (1920 files), radon average 2.95, pip-audit
+"No known vulnerabilities found", `pnpm audit --audit-level high` exit 0 (1 moderate). TypeScript untouched.
+Nothing outside `.ralph/` was written after the stamp run.
+
+For the Reviewer: `scripts/ralph/gates.sh --verify --e2e` (exit 0 → re-run nothing); mutations (a)-(c) in the
+table above; tick P08-FIX-25; commit by path incl. the three new files (`offload.py`, `test_offload.py`,
+`test_http_read.py`). Next for the Planner: P08-T03c.
+
+## Review P08-FIX-25 (Reviewer, 2026-11-06T05:30Z) — REJECTED, 2 findings
+
+Stamp: `scripts/ralph/gates.sh --verify --e2e` exit 0 on tree e59e7b3e (nothing re-run). The reader thread
+(`offload.py`), the cancel behaviour, the twin tests and the helpers are sound; no finding there. The
+rejection is about the rule that decides what stays on the event loop.
+
+1. **`packages/va_tools/src/va_tools/jsonpath.py:100-110` (`inline_read`) keeps paths on the event loop that
+   take seconds on answers under 2 KiB.** The rule only sends `..` away and assumes every other path is at
+   most linear in the answer ("about 0.5 ms per KiB in the worst shape measured", specs/13 §9 Decision
+   P08-FIX-25 item 1: "about 1 ms"). jsonpath-ng has three more shapes whose work multiplies, all accepted by
+   `va_tools.validation` (it only compiles the path) and all `inline_read(...) is True` today. Measured on
+   this runner (probes `logs/probe_review_fix25_{parent,root,union}.py`, run with `uv run python <file>`):
+
+   | Answer | Path | On the loop |
+   |---|---|---|
+   | `[0]*1000` (2 001 bytes) | `$[*].$[*]` (root re-entered after a wildcard) | 2 343 ms |
+   | same | `$.*.$.*` | 2 132 ms |
+   | same | `$[*].$[*].$[0]` | 7 064 ms |
+   | same | `$[*].($[*])` | 2 099 ms |
+   | same | `$[?($[*])]` (root path inside a filter) | 498 ms |
+   | same | ``$[*].`parent`[*]`` | 1 852 ms |
+   | `[0]*150` (301 bytes) | ``$[*].`parent`[*].`parent`[*]`` | 5 897 ms |
+   | 20 nested `{"a":…}` (121 bytes) | `$['a','a']` x 20 (181 chars; also `$.(a|a)…`, `$.(*|*)…`) | 6 400-7 300 ms, doubling per step |
+
+   Root re-entry and `parent` multiply by the element count per step; a union or a multi-name step doubles
+   the matches per step, so its cost is exponential in the path length (paths may be 500 chars) whatever the
+   answer's size. A per-turn dynamic data entry with one of these stalls every call of the pod for seconds,
+   which is exactly what this task exists to prevent.
+   Required: the rule must be an allowlist, not a list of known-bad text. An answer is read on the loop only
+   when every path is direct, or is of a class whose work is provably at most linear in the answer; anything
+   else goes to the reader whatever the size. Decide the class from the compiled tree (cached by
+   `compile_path`), for example: one `Root` at the far left only, then `Child` steps of a single-name
+   `Fields` (or `*`), a single `Index`, a `Slice`, or a `Filter` whose expressions are built from
+   `This`/single `Fields`/`Index` only; `Descendants`, a `Root` or `Parent` anywhere else, `Union`,
+   multi-name `Fields`, `Where`/`WhereNot`, and every named operator are never inline. (A path that does not
+   compile costs nothing to "search"; keep it counting or inline, but say which.) Tests: the table above as
+   parametrized cases that must be `inline_read(...) is False` at 1 byte, a hypothesis test for the linear
+   class like the existing one for direct paths (the compiled tree of every path the rule keeps on the loop
+   contains only the allowed nodes), and one HttpExecutor test that such a path is read on the reader.
+   Update specs/13 §9 Decision P08-FIX-25 item 1 and the table (add these rows), the `jsonpath.py` module
+   docstring and the AGENTS.md entry.
+   Not required here: bounding the work once it is on the reader. But these shapes make the open task
+   `fix:jsonpath-work-bound` wider than "two `..` steps": say so in item 4 of the Decision (a union path
+   holds the reader for an unbounded time on a 121-byte answer).
+
+2. **`packages/va_tools/src/va_tools/offload.py:14-15` and specs/13 §9 Decision P08-FIX-25 item 4 claim a
+   bound that does not exist.** The docstring says the wait for the thread is covered by "a tool's timeout";
+   the spec says "a tool's task is cancelled by its runner". Neither holds: `ToolRunner.run`
+   (`runner.py:197`), the Webhook node (`va_engine/handlers/webhook.py:102`) and
+   `va_pathways/recording.py:198` await `http.execute(call)` with no deadline, and `timeout_ms` is only the
+   httpx per-attempt timeout, which is over once the response is read. So a tool or Webhook node read that
+   queues behind another tenant's job waits until a barge-in or the end of the call; only dynamic data has
+   a budget. Before this change the same read ran at once (on the loop), so this wait is new.
+   Required: make the texts true. Preferred: bound the wait in `HttpExecutor._finish` on the executor's
+   clock (`va_common.waits.within`) with the call's `timeout_ms`, outcome `timeout` (a job still queued then
+   never runs), with a `held_reader()` test on a `ManualClock` executor and a line in item 4; check which
+   executor clocks the existing suites use first (a frozen clock times such a wait out at once, but only
+   offloaded reads take that path). If the Builder finds that this cannot be done without changing what
+   `timeout_ms` means, state in the docstring and in item 4 that a tool / Webhook node read has no limit of
+   its own until the call ends, and name it in the `fix:jsonpath-work-bound` follow-up.
+
+Not findings (checked): `_finish` gives the same outcome fields as before for no body / text / JSON; the
+cache hit keeps its oversize check before the parse; `off_loop` cancels a queued job through the wrapped
+future; no test polls or sleeps; the `partial` holds bytes and tuples only.
+
+## Build P08-FIX-25, second pass (Builder, 2026-11-06T05:35Z-): the 2 review findings
+
+**Finding 1 (the rule kept multiplying paths on the loop) — fixed: `inline_read` is an allowlist decided from
+the compiled tree.** `packages/va_tools/src/va_tools/jsonpath.py`:
+
+- Textual shortcuts stay: `..` in the text → never inline (no compile); a direct path in the plain spelling
+  (the `_DIRECT` regex) → free (no compile).
+- Any other path is judged by `_scan_weight(path)` (lru-cached verdict, compiles through `compile_path`):
+  *descending* = exact-type `Root` at the far left, then `Child` steps that are a single-name `Fields` (or
+  `*`), a single `Index`, a `Slice`, or a `Filter` whose expressions are exact `Expression`s with an operator
+  in {existence, `!`, `==`, `=`, `!=`, `<`, `<=`, `>`, `>=`}, a literal value, and a `This`-rooted target of
+  single names / single indexes only. Everything else → `None` = never inline at any size (Root/This/Parent
+  anywhere else, `Union`, multi-name `Fields`, multi `Index`, `Where`, `Operation`, `Len`/`SortedThis`/`Sub`/…,
+  `=~` (regex backtracking), `Or`, a path operand, a wildcard/slice/filter inside a filter, no leading `$`,
+  a path that does not compile). Exact `type(...) is` checks, so a new node type or subclass is never inline
+  until it is named.
+- Why descending is linear: every allowed step maps a value to DISTINCT children of it (read in
+  jsonpath-ng 1.15: `Slice`/`Fields('*')`/`Filter` on a scalar give `[]`, never the value itself), so step k
+  only holds values at depth k and no value is visited twice. A hypothesis test checks exactly that
+  behaviour (distinct `full_path`s, matches ≤ values of the document).
+- One thing the reviewer's sketch did not have, found by measuring: a filter's relative path multiplies by
+  its own length (`$[?(@.a.a…×240)]` over 1 000 scalars, 2 001 bytes: 29 ms). So a path has a weight: 1, plus
+  per filter expression 1 + the steps of its target; inline while `bytes × summed weights ≤ 2 048`.
+  Measured at the threshold (logs/probe_build_fix25_rule.py): 0.45 ms `$[*]`, 0.8 ms filters, 1.4 ms worst
+  (`$[*]` + 248 name steps over ints, each a caught AttributeError).
+- No compile on the loop for an answer already too large (`size × non-direct paths > 2 048` → False before
+  any compile), so the loop compiles exactly where the reviewed tree did (answers ≤ 2 KiB). An invalid path:
+  never inline, and the cached verdict means the loop parses it once (compile_path does not cache failures).
+
+**Finding 2 (docs claimed a bound that did not exist) — fixed by making the bound exist** (the reviewer's
+preferred option). `HttpExecutor._finish`: an off-loop read runs under `va_common.waits.within(reading,
+self._clock, call.timeout_ms / 1000)`; not finished → outcome `timeout`, status/body None, extracted names
+None, not re-sent (the retry loop is over; the request was answered), queued job never runs (within cancels
+the await). `timeout_ms` keeps its meaning for the request; it additionally limits the read. Log: the one
+`tools.http_request` line with `outcome=timeout` and `offloaded=true`. Inline reads have no deadline (the
+rule bounds them). offload.py docstring, http.py docstring and spec item 4 now say exactly this; item 4 also
+says the unbounded WORK on the reader includes the multiplying shapes (fix:jsonpath-work-bound is wider
+than two `..` steps).
+
+Consequence for tests (AGENTS.md): an executor on a FrozenClock/RecordingClock passes the read deadline at
+once — and for tiny answers RACES the reader (the three `$..plan` tests in test_dynamic_data passed by
+luck with `_fetch`'s RecordingClock, the 2 KiB ones in test_http_read failed). So every test whose answer
+may leave the loop now runs on a ManualClock: new `tools_helpers.manual_executor()`, `_fetch_waiting` in
+test_dynamic_data (over `manual_fetcher`), all of test_http_read. `test_runner`'s large-answer excerpt test
+used a wildcard path over 10 KiB on the frozen clock: its response_map is now a direct path (the test is
+about excerpts). Checked the other suites that build executors on frozen clocks (api tool test endpoint,
+webhook node, pathways recording): their answers are small with weight ≤ 3 → inline; the targeted run below
+is green.
+
+Tests added/changed (va_tools: 414 passed):
+- test_jsonpath.py: `DESCENDING` (18 paths with weights: at/above `2 048 // weight`), `REVIEWED` (the 8
+  review-table paths) + `MULTIPLYING` (24 more) + `UNIONS` (3, `filterwarnings` for the `|` deprecation) +
+  `INVALID` (5): False at 1 byte, 0 bytes, mixed with direct paths, and 1 MiB; an invalid path is parsed once
+  for the rule; nothing is compiled above the threshold; hypothesis `test_a_path_the_rule_keeps_on_the_loop_
+  only_goes_down` (grammar of 34 pieces inside and outside the class × random documents: tree holds only the
+  judged nodes, matches distinct and ≤ values) and the converse `test_a_tree_that_only_goes_down_is_what_the_
+  rule_keeps_on_the_loop`.
+- test_http_read.py: 5 multiplying paths (root, parent, names, regex, len) are read on the reader at 96
+  bytes; a read still held at `timeout_ms` (ManualClock 3 s, retries=2) is `timeout`, not re-sent, never
+  runs; a read in time leaves no sleeper; threshold cases now with weights (slice pair at 1 024, filter pair
+  at 512).
+- test_dynamic_data.py: cached-read twins + `named-operator`, `root-again`; held read ends at the EARLIER
+  of budget (6 s) and request timeout (2 s), parametrized.
+
+Guards proven (/var/tmp/fix25b_mut/run.py: copy, mutate in place, run the four test files (221 tests),
+restore, bytes equal):
+
+| Mutation | Result |
+|---|---|
+| a `off_loop` → `return work()` | 30 failed |
+| b `inline_read` → always True | 93 failed |
+| c `max_workers=2` | 6 failed |
+| d every compiled tree weighs 1 (the reviewed rule) | 55 failed |
+| e filters add no weight | 10 failed |
+| f several names / indexes in a step allowed | 7 failed |
+| g far-left origin not checked | 8 failed |
+| h `=~` allowed | 3 failed |
+| i path operand allowed | 4 failed |
+| j no read deadline (`within(..., None)`) | 2 failed |
+| k size shortcut removed | 1 failed |
+| l verdict not cached | 1 failed |
+| restored | 221 passed |
+
+Targeted run (final sources): va_tools + va_engine + va_pathways + media `test_call_dynamic_data`,
+`test_call_tools`, `test_runtime_{dynamic_data,pathway,tools}_sim` + api `test_tools_api`,
+`test_tools_test_api`, `test_pathway_chat_api` + workflows `test_prefetch_dynamic_data`: 1851 passed in 78 s.
+
+Docs: specs/13 §9 Decision P08-FIX-25 item 1 (allowlist, weights, what is never inline), item 4 (what is
+bounded: the executor's read deadline, the fetch budget; what is not: work on the reader, incl. the
+multiplying shapes), table rows (descending class at the threshold, long filter path, the reviewer's root /
+parent / multi-name rows, compile cost); jsonpath.py / http.py / offload.py docstrings; AGENTS.md entry.
+The plan entry's wording ("any other path counts the answer's bytes") is the Planner's; the spec Decision is
+the law — Reviewer may amend the plan line when ticking.
+
+Not done here (as the review allowed): bounding the work of a job on the reader → `fix:jsonpath-work-bound`.
+
+### Gates P08-FIX-25, second pass (real output; tree stamped by scripts/ralph/gates.sh)
+
+`make fmt` exit 0, then ONE `scripts/ralph/gates.sh --e2e` (2026-11-06T05:46Z-06:11Z, logs/gates_fix25b.log):
+lint, typecheck, placeholders (0 findings), openapi, specs (0 problems) pass; `make test` 13472 passed,
+7 skipped in 906.84 s, coverage 99.09 % (`va_tools/jsonpath.py`, `http.py`, `offload.py` 100 %,
+`dynamic_data.py` 99 %: the same one line as at HEAD); `make e2e` 1 failed, 19 passed:
+`tests_e2e/test_concurrent_calls.py` `assert underruns == 0` got 2.0.
+
+That failure is the known runner flake `fix:e2e-cold-start-flakes` (b), confirmed from the media log, not
+this change: two `outbound.underrun` lines 1 ms apart on two calls at 06:05:46Z, `since_prev_send_ms` 80.9 /
+82.0, `prev_send_await_ms` 0.0-0.1, `prev_resume_ms` 0.0 = ONE ~80 ms event-loop stall at opener time during
+the 50-call start, right after `make test` + image rebuild (a `gc_pause` generation 1 of 19.5 ms 2 s
+earlier). The capacity calls use no tool, Webhook node or dynamic data: the whole run logged 2
+`tools.http_request` lines in the media worker (the webhook flows), so the changed read path did not run
+in that flow. As planned: one `scripts/ralph/gates.sh --only e2e` retry on the same tree, thresholds
+untouched.
+
+Retry (`scripts/ralph/gates.sh --only e2e`, 06:12Z-06:19Z, logs/gates_fix25b_e2e_retry.log, same tree, warm
+stack): 20 passed in 420.11 s (capacity flow included). Then `scripts/ralph/gates.sh --verify --e2e` → exit 0:
+
+```
+lint          pass      7s  apps/dashboard lint: Done
+typecheck     pass      4s  apps/dashboard typecheck: Done
+placeholders  pass      5s  0 finding(s)
+openapi       pass      4s  check_openapi_drift: openapi/internal.json is current
+specs         pass      0s  check_spec_refs: 0 problem(s)
+test          pass    916s  ================= 13472 passed, 7 skipped in 906.84s (0:15:06) =================
+e2e           pass    434s  ================ 20 passed, 107 deselected in 420.11s (0:07:00) ================
+verified: every listed gate passed on tree b1dd1c24f9fda12eac796d62b5c9868e171b5288
+```
+
+Beside the stamp (outputs outside the tree): jscpd 0 clones (1920 files), radon average 2.95, pip-audit
+"No known vulnerabilities found" (hashed `uv export`), `pnpm audit --audit-level high` exit 0 (1 moderate).
+TypeScript untouched. Nothing outside `.ralph/` and the ignored `logs/` was written after the stamp run.
+Runtime task `fix:jsonpath-work-bound` now names the multiplying shapes too.
+
+For the Reviewer: `scripts/ralph/gates.sh --verify --e2e` (exit 0 → re-run nothing; note the e2e stamp is
+the retry, the first e2e run's capacity failure is the known flake described above). Mutations: the table
+above (`uv run python /var/tmp/fix25b_mut/run.py` re-runs all twelve and restores byte for byte). Probes:
+`logs/probe_build_fix25_costs.py` (parse cost, class worst cases), `logs/probe_build_fix25_rule.py` (the
+review paths are never inline, weights, cost at the threshold). Tick P08-FIX-25, commit by path incl. the
+three new files (`offload.py`, `test_offload.py`, `test_http_read.py`). Next for the Planner: P08-T03c.
+
+## Review P08-FIX-25, second pass (Reviewer, 2026-11-06T06:20Z-06:40Z) — APPROVED
+
+Stamp: `scripts/ralph/gates.sh --verify --e2e` exit 0 on tree b1dd1c24 before and after my checks (nothing
+re-run; the e2e stamp is the same-tree retry, the first run's capacity failure is the known flake
+`fix:e2e-cold-start-flakes`: 2 underruns from one ~80 ms loop stall, the flow runs no tool or dynamic data).
+
+Finding 1 (allowlist): read `jsonpath.py` against the installed jsonpath-ng 1.15.0 sources (`Slice.find`,
+`Index._find_base`, `Filter.find`, `Expression.find`, `Fields.reified_fields`, `Child.find`): every allowed
+step maps a value to distinct children (a slice / filter / `*` on a scalar gives `[]`; an index only applies
+to arrays), so the "descending = linear" argument holds for this version; exact-type checks keep a new node
+out. Own probes (kept in `logs/`): `probe_review2_fix25_rule.py` 21 adversarial descending shapes sized to
+the threshold (160 `[*]` steps, 240 `.*` steps, slices, deep nesting, 10-expression filters, string/int
+comparisons) → worst 1.3 ms on the loop; `probe_review2_fix25_never.py` 58 shapes (the 8 reviewed ones,
+unions, multi names/indexes, named operators, path operands, nested filters, regex, arithmetic, invalid)
+→ none inline at 1 byte except `$.a.(b)`, which compiles to plain `Child(Child(Root, a), b)` (correctly
+descending); `probe_review2_fix25_threads.py` parsing from 4 threads at a 1 µs switch interval gives the
+single-thread trees (the loop compiles for the rule while the reader compiles for large answers).
+Finding 2 (bound): `_finish` runs an off-loop read under `within(reading, clock, timeout_ms/1000)`;
+`within` cancels the read on timeout and on caller cancellation; outcome `timeout`, no status/body, not
+re-sent; production callers of the fetcher use `fetch_all` only (budget covers the cache-hit read). Texts
+(offload.py, http.py, spec item 4, AGENTS.md) now match the code.
+
+Mutations (`/var/tmp/review2_mut/run.py` = the Builder's twelve + five of mine, 221 targeted tests each,
+restored byte for byte, stamp still verifies): a 30 failed, b 93, c 6, d 55, e 10, f 7, g 8, h 4, i 3,
+j 2, k 1, l 1, m (filter target may hold a wildcard) 3, n (timed-out read keeps the 200 attempt) 2,
+o (cache hit always inline) 5, p (slice check not exact) 27, q (operator set unchecked) 4; restored 221 passed.
+
+Other suites: the only non-direct paths in tests outside va_tools are `$.alternatives[*].time` (api tool
+tests, small answers → inline) and `$.items[*].id` (va_pathways mock bodies, read on the loop by design).
+
+Accepted, not findings: a read that times out behind a busy reader is reported `timeout`, which the
+per-turn pause (P08-FIX-23) counts as an unanswered fetch (same class as the accepted hung-Redis edge);
+work on the reader stays unbounded → runtime task `fix:jsonpath-work-bound` (open, names the multiplying
+shapes). Plan entry ticked; its deliverable line amended to the allowlist wording. Next for the Planner:
+check the inbox, then P08-T03c.

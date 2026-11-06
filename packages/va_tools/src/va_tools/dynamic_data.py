@@ -12,6 +12,8 @@ Rules: specs/13 §7 Decision P08-T03a. :meth:`DynamicDataFetcher.fetch` runs one
    a body that is text, a bare string, nothing or ``null``, which an earlier build could store) and a Redis
    failure are misses. So is a stored value longer than the fetcher's ``max_cached_bytes`` plus the wrapper
    (checked before it is parsed): a fetcher hits exactly what it would store, whoever stored the value.
+   A stored value is parsed and searched under the same read rule as a fetched answer (on the event loop
+   only when its paths are cheap for its size, else on the reader thread; specs/13 §9 Decision P08-FIX-25).
 3. On a miss the request goes through the :class:`~va_engine.ports.HttpPort` (SSRF guard, size cap; no
    retries). Only a ``readable`` 2xx answer (rule 4) whose compact JSON is at most the fetcher's
    ``max_cached_bytes`` (:data:`MAX_CACHED_BYTES` unless the fetcher was built with a smaller limit)
@@ -49,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses
+import functools
 import hashlib
 import json
 import uuid
@@ -67,8 +70,9 @@ from va_domain.calls.tools import DynamicDataSpec
 from va_engine.handlers.reports import redacted_url
 from va_engine.ports import HttpOutcomeKind, HttpPort
 from va_engine.templating import TemplateScope, TemplateSyntaxError, render
-from va_tools.jsonpath import extract_all
+from va_tools.jsonpath import extract_all, inline_read
 from va_tools.models import ToolSpec
+from va_tools.offload import off_loop
 from va_tools.render import ToolRenderError, excerpt, render_request
 
 __all__ = [
@@ -275,6 +279,18 @@ def _cached_answer(raw: object) -> tuple[int, JsonValue] | None:
     return status, body
 
 
+def _cached_read(
+    raw: object, extract: tuple[tuple[str, str], ...]
+) -> tuple[int, Mapping[str, JsonValue]] | None:
+    """The status of a stored answer and what ``extract`` selects in its body; ``None`` when the value is
+    no answer. Data in, data out: it runs on the loop or on the reader thread."""
+    answer = _cached_answer(raw)
+    if answer is None:
+        return None
+    status, body = answer
+    return status, extract_all(body, extract)
+
+
 class DynamicDataFetcher:
     """Runs the dynamic data specs of one org's conversation over ``http`` (see the module docstring).
 
@@ -388,11 +404,10 @@ class DynamicDataFetcher:
         url = redacted_url(call.url)
         redis = self._redis if spec.cache and spec.cache_ttl_seconds > 0 else None
         key = cache_key(self._org_id, call.method, call.url, call.body)
-        hit = None if redis is None else await self._lookup(redis, key, index)
+        hit = None if redis is None else await self._lookup(redis, key, index, call.extract)
         if hit is not None:
-            status, body = hit
+            status, extracted = hit
             readable = True
-            extracted = extract_all(body, call.extract)
         else:
             outcome = await self._http.execute(call)
             if not outcome.succeeded:
@@ -461,7 +476,10 @@ class DynamicDataFetcher:
 
     # The cache.
 
-    async def _lookup(self, redis: Redis, key: str, index: int) -> tuple[int, JsonValue] | None:
+    async def _lookup(
+        self, redis: Redis, key: str, index: int, extract: tuple[tuple[str, str], ...]
+    ) -> tuple[int, Mapping[str, JsonValue]] | None:
+        """The status and the extracted values of the answer stored under ``key`` (``None`` on a miss)."""
         try:
             raw = await redis.get(key)
         except (RedisError, OSError) as exc:
@@ -469,13 +487,16 @@ class DynamicDataFetcher:
             return None
         if raw is None:
             return None
-        if _stored_bytes(raw) > self._max_cached_bytes + _ENVELOPE_BYTES:
+        size = _stored_bytes(raw)
+        if size > self._max_cached_bytes + _ENVELOPE_BYTES:
             _log.info("tools.dynamic_data_cache_oversized", index=index)
             return None
-        answer = _cached_answer(raw)
-        if answer is None:
+        work = functools.partial(_cached_read, raw, extract)
+        inline = inline_read(size, (path for _, path in extract))
+        hit = work() if inline else await off_loop(work)
+        if hit is None:
             _log.warning("tools.dynamic_data_cache_invalid", index=index)
-        return answer
+        return hit
 
     async def _store(
         self, redis: Redis, key: str, ttl_s: int, answer: tuple[int, JsonValue], index: int

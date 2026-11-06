@@ -571,6 +571,8 @@ Send Call `dynamic_data` (also persona/agent/inbound configs):
 >    (amended 2026-11-06, Decision P08-FIX-23 item 6) a stored value longer than the fetcher's cache limit
 >    plus 32 bytes for the wrapper, checked before it is parsed and logged `tools.dynamic_data_cache_oversized`:
 >    a fetcher hits exactly what it would store, whoever stored the value.
+>    (Amended 2026-11-06) A stored value is parsed and searched under the read rule of the
+>    specs/13 §9 Decision P08-FIX-25.
 > 3. On a miss the request goes through the shared HTTP executor (specs/13 §9 Decision 2026-11-03) with
 >    `User-Agent` and `X-VA-Call-Id` and **without a signature**: step 4 of §5 signs tool requests only, and a
 >    dynamic data endpoint authenticates the platform by its own header, as in the example above. Only a
@@ -835,6 +837,100 @@ once and the connection pinned to the checked IP (custom `httpx` transport) to p
 > parses, else text; JSONPath (`va_tools.jsonpath` over jsonpath-ng's extended parser, compiled paths LRU-cached)
 > applies to JSON bodies of any status: one match → value, several → list, none (or an invalid path, logged
 > without the path) → null. Logs carry method, host, status, outcome, attempts and duration only.
+
+> Decision (2026-11-06) P08-FIX-25: an answer is parsed and searched off the event loop when its paths can be
+> expensive. The outcome of a request is the same wherever its answer is read.
+>
+> 1. **The rule** (`va_tools.jsonpath.inline_read(size, paths)`). Parsing costs the same in any thread (it
+>    holds the interpreter lock), so only the JSONPaths decide. The rule is an allowlist: an answer is read
+>    on the loop only when the work of every path is known to be bounded by the answer's size; any other
+>    path sends it to the reader thread, whatever the size.
+>    - A path with `..` anywhere in its text is never read on the loop. The test is textual, so a quoted
+>      name holding `..` only costs a thread hop.
+>    - A *direct* path in the plain spelling, names and indexes only (`$.a.b[0]`, `$['a b']`, `$["x-y"][2]`),
+>      never counts: it costs microseconds at any size. `$['*']` is a wildcard in jsonpath-ng, so a quoted
+>      name holding `*` is not direct.
+>    - Any other path is judged by its compiled tree (the verdict is cached per path). It is *descending*
+>      when it is `$` at the far left followed only by steps that each go from a value to distinct children
+>      of it: one name, `*`, one index, a slice, or a filter whose expressions each test (existence, `!`) or
+>      compare (`==`, `=`, `!=`, `<`, `<=`, `>`, `>=`) a relative path of single names and indexes (`@`,
+>      `@.a[0].b`) with a literal; `&&` between such expressions is allowed. Every step moves one level
+>      down, so the path visits no value of the answer twice and its work is linear in the answer. A
+>      descending path weighs 1, plus, for every filter expression, 1 and the steps of its relative path
+>      (every candidate walks them: `$.a[?(@.x > 1)]` weighs 3). The answer is read on the loop when
+>      `bytes × summed weights ≤ 2 048` (`INLINE_SCAN_BYTES`: about 0.5 ms in the common shapes, 1.4 ms in
+>      the worst one measured), else off it.
+>    - Everything else is never read on the loop, at any size: `$` or `@` anywhere but the places above, the
+>      named operators (`` `parent` ``, `` `len` ``, `` `sorted` ``, `` `this` ``, `` `sub(...)` ``, ...), a
+>      union, a step with several names or indexes, `where`, arithmetic, `=~` (it runs a regular
+>      expression), `||`, a filter that compares with another path or whose relative path holds a wildcard,
+>      a slice or a filter, a path that does not start with `$`, and a path that does not compile (every
+>      read parses it again; the rule caches its verdict, so the loop parses it once). These shapes multiply
+>      (table below): root re-entry or `` `parent` `` after a wildcard is quadratic in the element count, and
+>      a step with several names doubles the matches per step, so its cost is exponential in the path's
+>      length whatever the answer's size.
+>
+>    No path is compiled on the loop for an answer that is too large for the loop anyway (bytes × the number
+>    of paths that are not direct already above the threshold). An answer without paths, and an empty body,
+>    are always read on the loop.
+> 2. **The reader thread** (`va_tools.offload.off_loop(work)`). A process has ONE reader thread
+>    (`va-tools-read`), shared by all its executors and fetchers; jobs run in submit order. It is not the
+>    default thread pool (`asyncio.to_thread`): several CPU-bound threads take the interpreter lock from one
+>    another and from the loop (table below). The caller's context variables are copied to the job, so a line
+>    logged from the thread keeps `call_id` / `org_id`.
+> 3. **Cancellation.** A request cancelled while its read waits for the thread or runs there returns at
+>    once. A read that has not started never runs; a running one finishes and its result is dropped.
+> 4. **What is bounded, and what is not.** The reader thread itself bounds nothing; its callers bound their
+>    wait:
+>    - `HttpExecutor` gives a read on the reader thread the request's `timeout_ms` on its clock, waiting for
+>      the thread included (before this Decision the read ran at once on the loop, so a tool or Webhook
+>      node, which have no deadline of their own around the request, could otherwise wait behind another
+>      tenant's read until a barge-in or the end of the call). A read that has not finished by then gives
+>      the outcome `timeout` with no status, body or extracted value: nothing of the answer is used. The
+>      request is not sent again (it was answered; `retries` cover the request, not the read), and a read
+>      still queued never runs. In `tools.http_request` this is the one line with `outcome="timeout"` and
+>      `offloaded=true`. A read on the loop has no deadline: the rule bounds its work.
+>    - A dynamic data fetch also ends at its budget, the read of a cache hit included (`timeout`).
+>
+>    The work of one read is not bounded: a job that runs holds the reader until it is done, whoever still
+>    waits for it, so later answers of the process that need the reader queue behind it and run into their
+>    own limits. A path with two `..` steps is quadratic in the nesting depth, and the multiplying shapes of
+>    item 1 are worse: a path of twenty two-name steps holds the reader for seconds on a 121-byte answer,
+>    doubling with every further step. Open follow-up: runtime task `fix:jsonpath-work-bound` (it must
+>    cover these shapes, not only `..`).
+> 5. **Where it applies.** `va_tools.http.HttpExecutor` (tools, Webhook nodes, scheduling nodes, dynamic data
+>    fetches) reads every answer under the rule; `tools.http_request` logs `offloaded` (whether the read left
+>    the loop) and its `duration_ms` includes the read. The dynamic data cache hit (specs/13 §7 Decision
+>    P08-T03a rule 2) parses and searches the stored value under the same rule, with the stored value's size.
+> 6. **What stays on the loop.** The variable checks and the cache write of dynamic data, and the tool
+>    runner's excerpts: per MiB, the cache `json.loads` costs 9.6 ms, the two `_compact` calls of a store
+>    22 ms, and the excerpts 1.3 ms each. In the media worker per-turn answers are at most 64 KiB (specs/13 §7
+>    Decision P08-FIX-23 item 6), so these stay under 3 ms; pre-call fetches of outbound calls run in the
+>    worker process. Mock bodies of pathway text runs (`va_pathways.recording.mocked_outcome`) are read on
+>    the loop too (api and worker, not a call).
+>
+> Measured on the build runner (8 vCPU, Python 3.12, switch interval 5 ms) by the Planner (probes
+> `logs/probe_plan_fix25*.py`), the Reviewer (the multiplying shapes, `logs/probe_review_fix25_*.py`) and the
+> Builder (the descending class, `logs/probe_build_fix25_*.py`). These numbers come from the probes, not from a unit test: under pytest a
+> collector pass in the thread makes loop-gap asserts flaky, so the tests record the thread a read ran on.
+>
+> | What | Result |
+> |---|---|
+> | read on the loop, `$..x`: 64 KiB / 262 KiB / 1 MiB | 13.6 / 54 / 214-240 ms (parse alone 0.35 / 1.5 / 8.7 ms) |
+> | one 1 MiB `$..x` read on the reader thread (media collector settings, uvloop) | loop gap 10-11 ms |
+> | ten 64 KiB `$..x` reads at once: default pool / two workers / one worker | loop gap 216 / 133 / 10 ms |
+> | ten 262 KiB reads at once: default pool / two workers / one worker | loop gap 475 / 108 / 15 ms |
+> | 4 KiB answer nested 680 deep: `$..x` / `$..*..x` / `$..a..x` | 1.1 / 654 / 695 ms |
+> | counting paths, worst shape (a filter over an array of scalars) | 1.3 ms at 2.6 KiB, 2.7 ms at 5.7 KiB, 10.7 ms at 26 KiB |
+> | descending paths at the threshold (2 047 bytes ÷ weight): `$[*]` / `$[*]` and 248 name steps / `$[?(@ == 0)]` / `$[?(!@.a)]` | 0.45 / 1.4 / 0.8 / 0.8 ms |
+> | a filter with a 240-step relative path over 1 000 scalars (2 001 bytes), read on the loop | 29 ms (it weighs 242: on the loop up to 8 bytes) |
+> | root re-entry on `[0]×1000` (2 001 bytes): `$[*].$[*]` / `$[*].$[*].$[0]` / `$[?($[*])]` | 2.3 s / 7.1 s / 0.5 s |
+> | `` `parent` `` after a wildcard: ``$[*].`parent`[*]`` on 2 001 bytes / twice on `[0]×150` (301 bytes) | 1.9 s / 5.9 s |
+> | twenty two-name steps (`$['a','a']`×20, 181 characters) on a 121-byte answer | 6.4-7.3 s, doubling per step |
+> | compiling a path: 15 characters / 500 characters | 0.3 / 1.1-1.7 ms (once per path and process) |
+> | direct path `$.data.plan` | 3-4 µs at any size up to 1 MiB |
+> | reader round trip on an idle loop | 43-58 µs |
+> | cancel while the reader is held | the awaiting task raises in 0.07 ms; the queued job never runs |
 
 ## 10. Tests required
 - CRUD, validation errors, secret masking, tenant isolation, reference-check delete.

@@ -150,7 +150,7 @@ async def test_blank_arguments_are_an_empty_object(api: respx.MockRouter) -> Non
 async def test_large_data_is_cut_to_an_excerpt_and_event_excerpt_is_short(api: respx.MockRouter) -> None:
     big = {"rows": ["x" * 100 for _ in range(100)]}
     api.post("/availability").respond(200, json=big)
-    invocation = await _run(_spec(), {"date": "d", "party_size": 1})
+    invocation = await _run(_spec(response_map={"first": "$.rows[0]"}), {"date": "d", "party_size": 1})
     data = json.loads(invocation.content)["data"]
     assert isinstance(data, str)
     assert len(data) == DATA_LIMIT

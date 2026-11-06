@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import threading
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -17,8 +18,19 @@ from clock_helpers import ManualClock, RecordingClock
 from fakeredis import FakeAsyncRedis, FakeServer
 from redis_ttl import assert_expires_in
 from service_helpers import json_log_stream, log_events
-from tools_helpers import API, ORG, HeldAnswer, manual_fetcher, plain_executor
+from tools_helpers import (
+    API,
+    ORG,
+    HeldAnswer,
+    held_reader,
+    manual_fetcher,
+    plain_executor,
+    read_waits,
+    thread_recorder,
+)
 
+import va_tools.dynamic_data
+import va_tools.http
 from va_domain.calls.tools import DynamicDataSpec
 from va_engine.ports import HttpCall, HttpOutcome
 from va_engine.templating import TemplateScope
@@ -33,6 +45,7 @@ from va_tools.dynamic_data import (
     merge_results,
 )
 from va_tools.http import USER_AGENT
+from va_tools.offload import READER_THREAD
 
 OTHER_ORG = uuid.UUID("0193c5d2-7a41-7c3e-9b0d-5f2e8a1c4d72")
 BUDGET_S = 6.0
@@ -95,6 +108,13 @@ async def _fetch(  # noqa: PLR0913 - one keyword per fetcher knob keeps the test
             executor, redis=redis, org_id=org_id, clock=recording, max_cached_bytes=max_cached_bytes
         )
         return await fetcher.fetch(spec, index, SCOPE, timeout_ms=5_000)
+
+
+async def _fetch_waiting(spec: DynamicDataSpec, *, redis: FakeAsyncRedis | None = None) -> DynamicDataResult:
+    """One fetch on a manual clock, for answers read on the reader thread: the executor waits for the
+    read (``_fetch``'s frozen clock would pass the read's deadline at once)."""
+    async with manual_fetcher(redis=redis) as (_clock, fetcher):
+        return await fetcher.fetch(spec, 0, SCOPE, timeout_ms=5_000)
 
 
 async def test_a_templated_request_renders_url_query_headers_and_body(api: respx.MockRouter) -> None:
@@ -231,6 +251,67 @@ async def test_a_cached_fetch_sends_no_request_and_reports_cached(
     assert (second.variables, second.sections) == (first.variables, first.sections)
     assert second.message() == "Dynamic data: 2 variables set (cached)"
     assert (first.readable, second.readable) == (True, True)
+
+
+@pytest.mark.parametrize(
+    ("path", "on_the_reader"),
+    [
+        ("$..plan", True),
+        ("$.contact.plan", False),
+        ("$.*.plan", False),
+        ("$.*.`this`.plan", True),
+        ("$.contact.$.contact.plan", True),
+    ],
+    ids=["descendant", "direct", "descending-small", "named-operator", "root-again"],
+)
+async def test_a_cached_answer_is_read_under_the_same_rule(
+    api: respx.MockRouter,
+    redis: FakeAsyncRedis,
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    *,
+    on_the_reader: bool,
+) -> None:
+    """specs/13 §9 Decision P08-FIX-25: a stored value is parsed and searched where a fetched answer
+    with these paths would be, and gives what the fetch gave."""
+    route = api.get("/contacts").respond(200, json=CONTACT)
+    spec = _spec(cache=True, response_data=[{"name": "plan", "data": path, "context": "Plan: {{plan}}."}])
+    first = await _fetch_waiting(spec, redis=redis)
+    parsed = thread_recorder(monkeypatch, va_tools.dynamic_data, "_cached_answer")
+    searched = thread_recorder(monkeypatch, va_tools.dynamic_data, "extract_all")
+
+    second = await _fetch_waiting(spec, redis=redis)
+
+    assert (route.call_count, first.cached, second.cached) == (1, False, True)
+    assert (second.outcome, second.status_code, second.readable) == ("ok", 200, True)
+    assert (second.variables, second.sections) == ({"plan": "Pro"}, {"plan": "Plan: Pro."})
+    assert (second.variables, second.sections) == (first.variables, first.sections)
+    assert (len(parsed), len(searched)) == (1, 1)
+    if on_the_reader:
+        assert all(name.startswith(READER_THREAD) for name in parsed + searched)
+    else:
+        assert parsed + searched == [threading.current_thread().name] * 2
+
+
+@pytest.mark.parametrize("stored", ["not json", "[1, 2]"], ids=["text", "list"])
+async def test_a_stored_value_that_is_no_answer_is_a_miss_on_the_reader_too(
+    api: respx.MockRouter, redis: FakeAsyncRedis, monkeypatch: pytest.MonkeyPatch, stored: str
+) -> None:
+    stream = json_log_stream()
+    route = api.get("/contacts").respond(200, json=CONTACT)
+    key = cache_key(ORG, "GET", f"{API}/contacts?phone=%2B14155550123", None)
+    await redis.set(key, stored)
+    parsed = thread_recorder(monkeypatch, va_tools.dynamic_data, "_cached_answer")
+
+    spec = _spec(cache=True, response_data=[{"name": "plan", "data": "$..plan"}])
+    result = await _fetch_waiting(spec, redis=redis)
+
+    assert (result.outcome, result.cached, route.call_count) == ("ok", False, 1)
+    assert result.variables == {"plan": "Pro"}
+    assert len(parsed) == 1
+    assert parsed[0].startswith(READER_THREAD)
+    assert await _stored(redis, key) == {"status": 200, "body": CONTACT}
+    assert "tools.dynamic_data_cache_invalid" in [line["event"] for line in log_events(stream)]
 
 
 UNREADABLE = [b"<html>Bad gateway</html>", b"", b'"maintenance"', b"null"]
@@ -821,11 +902,13 @@ def test_merge_results_later_fetch_wins_names_and_lines() -> None:
 
 @asynccontextmanager
 async def _fetching_all(
-    specs: list[tuple[int, DynamicDataSpec]],
+    specs: list[tuple[int, DynamicDataSpec]], *, timeout_ms: int = 5_000
 ) -> AsyncIterator[tuple[ManualClock, asyncio.Task[list[DynamicDataResult]]]]:
     """``fetch_all`` of ``specs`` running over the real executor on a manual clock (budget ``BUDGET_S``)."""
     async with manual_fetcher() as (clock, fetcher):
-        running = asyncio.create_task(fetcher.fetch_all(specs, SCOPE, timeout_ms=5_000, budget_s=BUDGET_S))
+        running = asyncio.create_task(
+            fetcher.fetch_all(specs, SCOPE, timeout_ms=timeout_ms, budget_s=BUDGET_S)
+        )
         try:
             yield clock, running
         finally:
@@ -903,6 +986,33 @@ async def test_fetch_all_reports_what_missed_the_budget_as_timeout(api: respx.Mo
     ]
     assert sorted(logged) == [(0, "ok"), (1, "timeout"), (2, "render_error")]
     assert "sk-9" not in stream.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("timeout_ms", "ends_s"), [(8_000, BUDGET_S), (2_000, 2.0)], ids=["budget", "request-timeout"]
+)
+async def test_a_fetch_whose_read_is_held_is_a_timeout_at_the_earlier_limit(
+    api: respx.MockRouter, monkeypatch: pytest.MonkeyPatch, timeout_ms: int, ends_s: float
+) -> None:
+    """specs/13 §9 Decision P08-FIX-25: the wait for the reader thread ends at the fetch budget or at the
+    request's timeout, whichever comes first, so a turn never waits for a busy reader."""
+    api.get("/contacts").respond(200, json=CONTACT)
+    entered = read_waits(monkeypatch, va_tools.http)
+    searched = thread_recorder(monkeypatch, va_tools.http, "extract_all")
+    specs = [(0, _spec(response_data=[{"name": "plan", "data": "$..plan"}]))]
+    async with held_reader() as gate, _fetching_all(specs, timeout_ms=timeout_ms) as (clock, running):
+        async with asyncio.timeout(5):
+            await entered.wait()
+        await clock.wait_for_sleep(ends_s)
+        await clock.run_for(ends_s)
+        results = await running
+        still_held = not gate.is_set()
+
+    assert still_held
+    assert [(result.outcome, result.variables, result.duration_ms) for result in results] == [
+        ("timeout", {}, round(ends_s * 1000))
+    ]
+    assert searched == []
 
 
 class _NeverAsked:
